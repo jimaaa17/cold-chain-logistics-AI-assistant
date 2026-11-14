@@ -26,7 +26,22 @@ docker run -v mssql_data:/var/opt/mssql \
 
 ```
 - Install the requirements: pip install -r requirements.txt
-- python scripts/ingest_legacy_data.py
+- Load the legacy table (`dbo.TBL_SC_FLEET_HIST_RAW`):
+  ```
+  python scripts/ingest_legacy_data.py --dry-run      # validate the CSV only, no DB access
+  python scripts/ingest_legacy_data.py                # atomic full refresh (staging table -> swap)
+  python scripts/ingest_legacy_data.py --mode upsert  # MERGE new/changed rows on TS_UTC
+  python scripts/ingest_legacy_data.py --force        # reload even if the CSV is unchanged
+  ```
+  - Required env: `SQL_ADMIN_USER`, `SQL_ADMIN_PASSWORD` (plus `SQL_SERVER_HOST`, `SQL_SERVER_PORT`).
+  - Optional env: `SQL_SERVER_DATABASE` (default `master`), `SQL_ODBC_DRIVER` (default: newest installed
+    `ODBC Driver NN for SQL Server`), `SQL_ENCRYPT`, `SQL_TRUST_SERVER_CERTIFICATE`, `RAW_DATA_PATH`,
+    `CSV_CHUNK_ROWS`, `INSERT_BATCH_ROWS`, `MAX_REJECT_RATIO` (default `0.01`), `REJECT_DIR`.
+  - Invalid rows are written to `data/rejects/<run_id>.csv`; the load aborts (live table untouched) if
+    more than `MAX_REJECT_RATIO` of rows are rejected.
+  - Exit codes: 0 ok/skipped, 1 load or validation failure, 2 config error, 3 another load is running.
+  - Every run is recorded in `dbo.TBL_SC_INGEST_AUDIT`:
+    `SELECT TOP 10 * FROM dbo.TBL_SC_INGEST_AUDIT ORDER BY STARTED_UTC DESC;`
 
 #Connecting to the data
 Download : https://github.com/microsoft/azuredatastudio
@@ -70,7 +85,7 @@ Download : https://github.com/microsoft/azuredatastudio
 - install the docker
 - 
 ```
-ocker run -v mssql_data:/var/opt/mssql \
+docker run -v mssql_data:/var/opt/mssql \
   -e "ACCEPT_EULA=Y" \
   -e "MSSQL_SA_PASSWORD=FdeEnterprisePass123!" \
   -p 1433:1433 \
@@ -78,3 +93,7 @@ ocker run -v mssql_data:/var/opt/mssql \
   -d mcr.microsoft.com/mssql/server:2022-latest
 ```
 - copy the ip address of the EC2 instance(public) to connect to cloud legacy system
+
+
+# Phase 1
+- Get API key for Pinecone and GEMINI
