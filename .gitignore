@@ -12,6 +12,7 @@ ENV/
 # Raw / large data files (keep data/source/ tracked)
 data/raw/
 data/processed/
+data/rejects/
 *.csv
 *.parquet
 *.db

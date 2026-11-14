@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Legacy Ingestion Code Review</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 18mm 15mm; }
+  :root { --ink:#1b1f24; --muted:#5b6470; --line:#d9dee4; --soft:#f4f6f8;
+          --crit:#b42318; --high:#c4320a; --med:#a15c07; --low:#475467; --ok:#067647; }
+  * { box-sizing: border-box; }
+  html, body { background:#fff; }
+  body { font: 10pt/1.5 -apple-system, "Helvetica Neue", Arial, sans-serif; color: var(--ink); margin:0; }
+  h1 { font-size: 19pt; line-height:1.2; margin: 0 0 2pt; }
+  h2 { font-size: 13.5pt; margin: 20pt 0 8pt; padding-bottom: 3pt; border-bottom: 1.5pt solid var(--ink); break-after: avoid; }
+  h3 { font-size: 11pt; margin: 0 0 4pt; break-after: avoid; }
+  h4 { font-size: 9.5pt; margin: 8pt 0 2pt; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; break-after: avoid; }
+  p, li { margin: 0 0 5pt; }
+  ul, ol { margin: 0 0 6pt; padding-left: 16pt; }
+  code, pre { font: 8.4pt/1.45 "SF Mono", Menlo, Consolas, monospace; }
+  code { background: var(--soft); padding: 0 2.5pt; border-radius: 2pt; }
+  pre { background: var(--soft); border: .75pt solid var(--line); border-left: 2.5pt solid var(--crit); padding: 6pt 8pt; white-space: pre-wrap; word-break: break-word; margin: 3pt 0 6pt; }
+  table { width: 100%; border-collapse: collapse; margin: 5pt 0 9pt; font-size: 9pt; }
+  th, td { border: .75pt solid var(--line); padding: 3.5pt 5pt; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  tr { break-inside: avoid; }
+  .subtitle { color: var(--muted); margin: 0 0 8pt; }
+  .meta td:first-child { width: 24%; color: var(--muted); }
+  .verdict { border: 1.5pt solid var(--crit); background: #fef3f2; padding: 8pt 10pt; margin: 6pt 0 10pt; border-radius: 3pt; }
+  .verdict b.big { color: var(--crit); font-size: 13pt; }
+  .sev { display:inline-block; font-size: 7.5pt; font-weight: 700; letter-spacing:.05em; text-transform: uppercase; color:#fff; padding: 1pt 5pt; border-radius: 2pt; white-space: nowrap; }
+  .Critical { background: var(--crit); } .High { background: var(--high); } .Medium { background: var(--med); } .Low { background: var(--low); }
+  .open { display:inline-block; font-size: 7.5pt; font-weight: 700; color: var(--crit); border: 1pt solid var(--crit); padding: 0 4pt; border-radius: 2pt; }
+  .finding { border: .75pt solid var(--line); border-radius: 3pt; padding: 8pt 10pt 4pt; margin: 0 0 9pt; }
+  .finding p, .finding pre { break-inside: avoid; }
+  h4 code { text-transform: none; letter-spacing: 0; color: var(--ink); background: none; padding: 0; }
+  .finding .facts { font-size: 8.8pt; color: var(--muted); margin: 0 0 4pt; }
+  .muted { color: var(--muted); }
+  .small { font-size: 8.8pt; }
+  .pagebreak { break-before: page; }
+  .gate-go { color: var(--crit); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Code Review: Legacy Data Ingestion (<code>legacy_ingest/</code>)</h1>
+<p class="subtitle">Cold-Chain Logistics AI-Assistant · CSV → MSSQL loader for <code>dbo.TBL_SC_FLEET_HIST_RAW</code></p>
+<table class="meta">
+  <tr><td>Author</td><td>Jimit Naik</td></tr>
+  <tr><td>Date / version</td><td>2026-11-13 · v1.0</td></tr>
+  <tr><td>Code reviewed</td><td><code>legacy_ingest/</code> (12 files, 929 lines) and its entry point <code>scripts/ingest_legacy_data.py</code>. Working tree on branch <code>feat/langgraph-secure-agent</code>, base commit <code>c2caa93</code>. The package is not committed yet.</td></tr>
+  <tr><td>Assessed for</td><td>Production: a scheduled job feeding the telemetry that the agent reads through <code>VW_ACTIVE_FLEET</code> (login <code>USR_FDE_RO</code>)</td></tr>
+  <tr><td>Reproduction tests</td><td><code>tests/open_findings/test_legacy_open_findings.py</code>: 11 tests, all failing on the reviewed code</td></tr>
+</table>
+
+<h2>1. Decision Summary</h2>
+
+<div class="verdict">
+  <b class="big">Verdict: NO-GO</b> for running the loader as a scheduled production job.<br>
+  It becomes a GO once <b>F-01</b> (Critical) and <b>F-02</b> (High) are fixed and their reproduction tests pass in the main suite.
+</div>
+
+<p><b>Why NO-GO.</b> In normal operation, the first scheduled refresh replaces the live table with a new database object. Permissions, indexes and dependent views on <code>dbo.TBL_SC_FLEET_HIST_RAW</code> are lost (<b>F-01</b>), so the agent's read-only login can lose access to fleet telemetry while the loader reports <code>SUCCEEDED</code>. If the view is created <code>WITH SCHEMABINDING</code>, every refresh fails instead. Separately, if the database connection drops during a load, the error handler crashes. The real cause is hidden and the audit row stays <code>RUNNING</code> forever (<b>F-02</b>).</p>
+
+<p><b>What is already safe.</b> The data path is sound. A failed load never publishes partial data; the live table is either the old version or the complete new one. Invalid rows are quarantined, and the staging table is checked against the source before anything is published. The loader was verified end to end against the project's SQL Server 2022 instance: 32,065 rows loaded in 3.1&nbsp;s, an unchanged re-run was skipped, and an upsert made 0 changes as expected. Running it manually today produces correct data. The blockers are about how it coexists with other database objects and how it behaves when things go wrong.</p>
+
+<table>
+  <tr><th style="width:16%">Severity</th><th style="width:8%">Count</th><th>Findings</th></tr>
+  <tr><td><span class="sev Critical">Critical</span></td><td>1</td><td>F-01 Refresh drops grants, indexes and views on the live table</td></tr>
+  <tr><td><span class="sev High">High</span></td><td>1</td><td>F-02 Failure handler crashes on a dead connection; audit stuck at RUNNING</td></tr>
+  <tr><td><span class="sev Medium">Medium</span></td><td>5</td><td>F-03 Deadlocks never retried · F-04 Upsert skips an emptied table · F-05 Audit hash can describe the wrong file · F-06 CSV missing a column exits 1, not 2 · F-07 Loader depends on <code>rag/</code></td></tr>
+  <tr><td><span class="sev Low">Low</span></td><td>4</td><td>F-08 Reject file hidden on failure · F-09 <code>--chunk-rows 0</code> ignored · F-10 Identifier check accepts a trailing newline · F-11 Source read three times; duplicate check slows quadratically</td></tr>
+</table>
+<p class="small muted">All 11 findings are <b>OPEN</b>. Each one has an automated test that fails on the reviewed code (Section 3 and Appendix A).</p>
+
+<h2>2. Scope &amp; Method</h2>
+
+<h4>In scope</h4>
+<p><code>legacy_ingest/</code>: <code>config.py</code>, <code>schema.py</code>, <code>extract.py</code>, <code>transform.py</code>, <code>validate.py</code>, <code>db.py</code>, <code>audit.py</code>, <code>loader.py</code>, <code>cli.py</code>, <code>errors.py</code> and the backward-compatible wrapper <code>scripts/ingest_legacy_data.py</code>.</p>
+
+<h4>Out of scope</h4>
+<p>The SOP retrieval platform (<code>rag/</code>) is covered by a separate review; it appears here only as a dependency in F-07. Also out of scope: SQL Server configuration and hardening, the creation of <code>VW_ACTIVE_FLEET</code> and <code>USR_FDE_RO</code>, infrastructure, and a dedicated security review.</p>
+
+<h4>How the loader works (context for the findings)</h4>
+<p>The loader reads the CSV in chunks and maps the 9 source columns to legacy names. It validates each row, sends rejected rows to <code>data/rejects/&lt;run_id&gt;.csv</code>, and bulk-inserts valid rows into <code>&lt;table&gt;__STG</code>. It then checks the staging table against the source (row count and the earliest and latest <code>TS_UTC</code>) and publishes in one of two modes:</p>
+<ul>
+  <li><b>refresh</b> (default): in one transaction, renames the live table to <code>__OLD</code>, renames the staging table to the live name, drops <code>__OLD</code> and renames the constraints.</li>
+  <li><b>upsert</b>: runs a <code>MERGE</code> into the live table on <code>TS_UTC</code>.</li>
+</ul>
+<p>Each run records a row in <code>dbo.TBL_SC_INGEST_AUDIT</code>. The run is skipped if the CSV's SHA-256 matches the last successful load, and an application lock (<code>sp_getapplock</code>) stops two loads running at once.</p>
+
+<h4>Method</h4>
+<ol>
+  <li><b>Review.</b> One structured code-review pass over the package, looking for correctness, reliability, operability and performance defects.</li>
+  <li><b>Proof.</b> Each finding was turned into a unit test that asserts the <i>correct</i> behaviour. All 11 tests fail on the reviewed code, each for the reason stated in its finding. The tests run offline against an in-memory SQL Server fake that extends the one in the existing suite; it also models grants, one-off errors and dropped connections. Findings that could not be reproduced this way would have been dropped; none were.</li>
+  <li><b>Grading.</b> Severity is graded for a production scheduled job using the rubric below.</li>
+</ol>
+<p class="small"><b>Independence note.</b> Claude Code (an AI coding assistant) wrote this loader earlier on 2026-11-13, as a refactor of the original <code>scripts/ingest_legacy_data.py</code>. The same assistant then ran the review as a separate pass. Readers should weigh the findings with that in mind; the failing tests are the evidence and can be checked independently.</p>
+
+<h4>Severity rubric</h4>
+<table>
+  <tr><th style="width:14%">Severity</th><th>Meaning</th><th style="width:28%">Gate</th></tr>
+  <tr><td><span class="sev Critical">Critical</span></td><td>Breaks a dependent system or exposes or loses data in normal operation.</td><td>Must fix before GO</td></tr>
+  <tr><td><span class="sev High">High</span></td><td>Under a realistic fault, leaves wrong state or hides the failure from operators.</td><td>Must fix before GO</td></tr>
+  <tr><td><span class="sev Medium">Medium</span></td><td>Wrong behaviour only under specific conditions, or a structural problem that raises operating cost.</td><td>Fix within the first iteration after GO</td></tr>
+  <tr><td><span class="sev Low">Low</span></td><td>Hardening, consistency or performance at scale.</td><td>Backlog</td></tr>
+</table>
+
+<h2 class="pagebreak">3. Findings</h2>
+<p class="small muted">Each finding gives its location, what goes wrong, the failing proof test with its output, and the recommended fix. Test names are prefixed with the finding ID, for example <code>test_F01_…</code>.</p>
+
+<div class="finding">
+  <h3>F-01 · Refresh drops grants, indexes and dependent views on the live table</h3>
+  <p class="facts"><span class="sev Critical">Critical</span> <span class="open">OPEN</span> · <code>legacy_ingest/loader.py:212–229</code> (<code>_publish_swap</code>)</p>
+  <p><b>What happens.</b> Refresh publishes by renaming the live table to <code>__OLD</code>, renaming staging into its place and dropping <code>__OLD</code>. The table seen by readers is therefore a new object after every refresh. Anything attached to the old object is dropped with it: object-level <code>GRANT</code>s, indexes added later, triggers and extended properties.</p>
+  <p><b>Failure scenario.</b> A DBA runs <code>GRANT SELECT ON dbo.TBL_SC_FLEET_HIST_RAW TO USR_FDE_RO</code> so the agent can read telemetry. The next scheduled refresh drops that grant, and the agent's queries fail with a permission error. The loader logs <code>SUCCEEDED</code>. If <code>VW_ACTIVE_FLEET</code> is created <code>WITH SCHEMABINDING</code>, the rename fails instead and every refresh ends <code>FAILED</code>.</p>
+  <h4>Proof · <code>test_F01_refresh_preserves_permissions_on_live_table</code></h4>
+  <pre>AssertionError: None != {'SELECT TO USR_FDE_RO'} : refresh dropped the GRANT the agent's read-only login depends on</pre>
+  <p><b>Recommended fix.</b> Keep the live table as the same object and switch the data in instead. In one transaction run <code>TRUNCATE TABLE live; ALTER TABLE __STG SWITCH TO live;</code>. This is a metadata-only, effectively instant operation, and it requires the staging table to have identical columns, constraints and filegroup. It also removes the constraint-renaming step entirely. Add an integration test that creates a grant and a schema-bound view before the refresh.</p>
+</div>
+
+<div class="finding">
+  <h3>F-02 · Failure handler crashes on a dead connection; audit row stuck at RUNNING</h3>
+  <p class="facts"><span class="sev High">High</span> <span class="open">OPEN</span> · <code>legacy_ingest/loader.py:165–171</code></p>
+  <p><b>What happens.</b> When a load fails, the handler calls <code>conn.rollback()</code> without any protection. If the connection is already gone, that call raises. The real error is replaced by the rollback error, the staging table is left behind, and the audit row is never updated. A Ctrl-C or <code>SIGTERM</code> during the load skips the handler in the same way.</p>
+  <p><b>Failure scenario.</b> The link to the EC2-hosted SQL Server drops during the bulk insert (SQLSTATE <code>08S01</code>). The log shows only the rollback failure, and <code>TBL_SC_INGEST_AUDIT</code> shows a run that is <code>RUNNING</code> forever, so monitoring can't tell a hung load from a dead one.</p>
+  <h4>Proof · <code>test_F02_dead_connection_during_failure_handling_still_returns_failed_report</code></h4>
+  <pre>RuntimeError: 08S01 communication link failure
+During handling of the above exception, another exception occurred:
+RuntimeError: 08S01 rollback on dead connection
+AssertionError: run() raised from the failure handler instead of returning FAILED: 08S01 rollback on dead connection</pre>
+  <p><b>Recommended fix.</b> Run the rollback, staging cleanup and audit update independently, so that one failing doesn't skip the others. If the connection is dead, finish the audit row on a new connection. At the start of each run, while holding the lock, mark any leftover <code>RUNNING</code> rows for the table as <code>ABANDONED</code>. The lock guarantees no other run is active, so such rows are always stale.</p>
+</div>
+
+<div class="finding">
+  <h3>F-03 · Deadlocks and dropped connections during publish are never retried</h3>
+  <p class="facts"><span class="sev Medium">Medium</span> <span class="open">OPEN</span> · <code>legacy_ingest/db.py:21, 53</code></p>
+  <p><b>What happens.</b> <code>TRANSIENT_SQLSTATES</code> includes <code>40001</code> (deadlock victim), which suggests retries. But the retry decorator wraps only <code>pyodbc.connect</code>. A deadlock during the <code>MERGE</code>, the swap or the bulk insert fails the run immediately.</p>
+  <p><b>Failure scenario.</b> An upsert's <code>MERGE … WITH (HOLDLOCK)</code> deadlocks with a reader of <code>VW_ACTIVE_FLEET</code>, and SQL Server chooses the loader as the victim. The scheduled run exits 1 and pages the on-call engineer, even though simply running again would have succeeded.</p>
+  <h4>Proof · <code>test_F03_deadlock_victim_during_publish_is_retried</code></h4>
+  <pre>AssertionError: 'FAILED' != 'SUCCEEDED' : deadlock not retried: Exception: ('40001', 'deadlock victim')</pre>
+  <p><b>Recommended fix.</b> Retry the whole publish transaction (rolling back between attempts) a bounded number of times on <code>40001</code> or error 1205. This is safe because staging is unchanged until the commit. Otherwise, remove <code>40001</code> from the constant so it no longer implies retries that don't happen.</p>
+</div>
+
+<div class="finding">
+  <h3>F-04 · Upsert skips the load when the live table has been emptied</h3>
+  <p class="facts"><span class="sev Medium">Medium</span> <span class="open">OPEN</span> · <code>legacy_ingest/loader.py:177–187</code> (<code>_unchanged</code>)</p>
+  <p><b>What happens.</b> In refresh mode, the skip-if-unchanged check also compares the live table's row count with the last successful load. In upsert mode it only checks that the table exists.</p>
+  <p><b>Failure scenario.</b> After a successful <code>--mode upsert</code>, someone truncates the table, for example while cleaning up after an incident. The next scheduled upsert with the same CSV is <code>SKIPPED</code> and exits 0, so the agent sees no fleet history until someone thinks to pass <code>--force</code>.</p>
+  <h4>Proof · <code>test_F04_upsert_does_not_skip_when_live_table_was_emptied</code></h4>
+  <pre>AssertionError: 'SKIPPED' == 'SKIPPED' : upsert skipped although the live table is empty</pre>
+  <p><b>Recommended fix.</b> Apply the row-count check in upsert mode as well. For upsert the condition is that the live table holds at least the number of rows last loaded. Alternatively, never skip in upsert mode; a <code>MERGE</code> that changes nothing is cheap.</p>
+</div>
+
+<div class="finding">
+  <h3>F-05 · The audit hash can describe a different file from the one loaded</h3>
+  <p class="facts"><span class="sev Medium">Medium</span> <span class="open">OPEN</span> · <code>legacy_ingest/loader.py:140</code>, <code>extract.py:21–33</code></p>
+  <p><b>What happens.</b> The SHA-256 that drives the skip-if-unchanged check is computed in one pass over the file before the lock is taken. The rows are then parsed in a later, separate pass. If the file changes in between, the audit row records the old hash next to the new data.</p>
+  <p><b>Failure scenario.</b> A re-download replaces the CSV while a run is starting. The table now holds version B, but the audit says version A was loaded. A later run with file A is then wrongly <code>SKIPPED</code>, and the table keeps B's data.</p>
+  <h4>Proof · <code>test_F05_audit_hash_matches_the_bytes_actually_loaded</code></h4>
+  <pre>AssertionError: '24297cff…834a2' != '4c81005d…74f2b' : audit recorded the hash of a file version that was not loaded</pre>
+  <p><b>Recommended fix.</b> Hash the bytes while they are being parsed: give <code>read_csv</code> a file object that updates the digest as it is read. Then take the skip decision either from a snapshot copy of the file or before parsing, using the same handle. This also fixes part of F-11.</p>
+</div>
+
+<div class="finding">
+  <h3>F-06 · A CSV missing a column exits 1 (load failure) instead of 2 (config error)</h3>
+  <p class="facts"><span class="sev Medium">Medium</span> <span class="open">OPEN</span> · <code>legacy_ingest/loader.py:136–171</code>, <code>extract.py:14</code></p>
+  <p><b>What happens.</b> The header check runs inside the load's error handling. The <code>ConfigError</code> it raises is caught as a generic failure: the loader has already written an audit row and created the staging table, and it then exits 1. The CLI documents exit 2 for configuration errors, and <code>Loader.run</code> promises they surface "before any work". <code>--dry-run</code> on the same file correctly exits 2.</p>
+  <p><b>Failure scenario.</b> The upstream dataset renames <code>iot_temperature</code>. The scheduler sees exit 1 ("data problem, retry later") instead of exit 2 ("broken configuration, needs a human"), so it retries the same failure every run.</p>
+  <h4>Proof · <code>test_F06_csv_missing_column_is_config_error_exit_2</code></h4>
+  <pre>AssertionError: 1 != 2 : missing CSV column reported as a load failure (exit 1)</pre>
+  <p><b>Recommended fix.</b> Call <code>check_header</code> in <code>Loader.run</code> before connecting, alongside the file-exists check. If any <code>ConfigError</code> is still raised during the load, re-raise it as a configuration error after cleanup rather than turning it into a <code>FAILED</code> report.</p>
+</div>
+
+<div class="finding">
+  <h3>F-07 · The loader cannot be deployed without the <code>rag/</code> package</h3>
+  <p class="facts"><span class="sev Medium">Medium</span> <span class="open">OPEN</span> · <code>legacy_ingest/config.py:16</code>, <code>cli.py:21</code>, <code>db.py:15</code></p>
+  <p><b>What happens.</b> The loader imports <code>PROJECT_ROOT</code> and <code>configure_logging</code> from <code>rag.config</code>, and its retry helper from <code>rag.core.resilience</code>. The refactor also changed <code>rag/core/resilience.py</code> to add a <code>predicate</code> parameter. Two unrelated services are now linked: the data-tier batch job and the SOP retrieval platform.</p>
+  <p><b>Failure scenario.</b> A change to <code>rag/</code>'s settings or retry policy, such as a new required Pinecone setting, breaks or alters the legacy loader. A container built for the loader must also carry <code>rag/</code> and its configuration. Reviews of either package now pull in the other, which is exactly how the two reviews got mixed up.</p>
+  <h4>Proof · <code>test_F07_legacy_ingest_does_not_depend_on_rag</code></h4>
+  <pre>AssertionError: Lists differ: ['cli.py: rag.config', 'config.py: rag.config', 'db.py: rag.core.resilience'] != []</pre>
+  <p><b>Recommended fix.</b> Move the shared helpers (<code>PROJECT_ROOT</code>, <code>configure_logging</code>, the retry decorator) into a neutral <code>common/</code> package that both services import. Alternatively, copy the three small helpers into <code>legacy_ingest/</code>. Either way, revert or move the change to <code>rag/core/resilience.py</code>.</p>
+</div>
+
+<div class="finding">
+  <h3>F-08 · A failed run does not report the reject file it already wrote</h3>
+  <p class="facts"><span class="sev Low">Low</span> <span class="open">OPEN</span> · <code>legacy_ingest/loader.py:100–101</code></p>
+  <p><b>What happens.</b> <code>report.reject_file</code> is set only after every chunk has been read. If the load fails partway through, rejected rows are already on disk but the report says there are none, so the CLI's "Rejected rows written to …" warning never appears.</p>
+  <h4>Proof · <code>test_F08_failed_run_still_reports_written_reject_file</code></h4>
+  <pre>AssertionError: None != '&lt;tmp&gt;/rejects/&lt;run_id&gt;.csv' : FAILED report hides the reject file</pre>
+  <p><b>Recommended fix.</b> Set <code>reject_file</code> as soon as <code>RejectSink</code> writes its first row.</p>
+</div>
+
+<div class="finding">
+  <h3>F-09 · <code>--chunk-rows 0</code> is silently ignored</h3>
+  <p class="facts"><span class="sev Low">Low</span> <span class="open">OPEN</span> · <code>legacy_ingest/cli.py:43</code></p>
+  <p><b>What happens.</b> <code>if args.chunk_rows:</code> treats 0 as "flag not given", so the run uses the default chunk size and exits 0. <code>--chunk-rows -1</code> correctly exits 2, and <code>--max-reject-ratio</code> on the line before already uses <code>is not None</code>.</p>
+  <h4>Proof · <code>test_F09_chunk_rows_zero_is_rejected</code></h4>
+  <pre>AssertionError: 0 != 2 : --chunk-rows 0 silently ignored</pre>
+  <p><b>Recommended fix.</b> Use <code>if args.chunk_rows is not None:</code>.</p>
+</div>
+
+<div class="finding">
+  <h3>F-10 · The identifier check accepts names ending in a newline</h3>
+  <p class="facts"><span class="sev Low">Low</span> <span class="open">OPEN</span> · <code>legacy_ingest/schema.py:17</code></p>
+  <p><b>What happens.</b> The table-name check uses <code>re.match</code> with a pattern ending in <code>$</code>, and <code>$</code> also matches just before a trailing newline. A <code>TARGET_TABLE</code> value ending in <code>\n</code>, for example from a careless <code>.env</code> edit, passes. The loader then silently creates and publishes a differently named table that the agent's view never reads. The check still blocks SQL injection; this is a correctness problem, not a security one.</p>
+  <h4>Proof · <code>test_F10_identifier_with_trailing_newline_is_rejected</code></h4>
+  <pre>AssertionError: ValueError not raised : quote_ident accepted 'TBL\n'</pre>
+  <p><b>Recommended fix.</b> Use <code>_IDENTIFIER.fullmatch(name)</code>, or end the pattern with <code>\Z</code>.</p>
+</div>
+
+<div class="finding">
+  <h3>F-11 · The source file is read three times, and the duplicate check slows quadratically</h3>
+  <p class="facts"><span class="sev Low">Low</span> <span class="open">OPEN</span> · <code>legacy_ingest/extract.py:14–33</code>, <code>validate.py:48</code></p>
+  <p><b>What happens.</b> Each load reads the CSV three times: once to hash it, once to check the header and once to parse it. Separately, <code>candidates.isin(seen_keys)</code> rebuilds a lookup table from every key seen so far on each chunk, so duplicate checking costs O(rows × chunks). The current 32k-row file still loads in about 3 s, but a multi-million-row history would spend most of its time on this.</p>
+  <h4>Proof · <code>test_F11_source_csv_is_read_in_a_single_pass</code></h4>
+  <pre>AssertionError: 3 != 1 : source file read 3 times per load</pre>
+  <p><b>Recommended fix.</b> Read the file once: hash it while parsing (shared with F-05), and check the header against the first chunk's columns. For duplicates, test membership against the set directly with <code>candidates.map(seen_keys.__contains__)</code>, or keep a sorted key index, so each chunk costs time proportional to its own size.</p>
+</div>
+
+<h2>4. Strengths Observed</h2>
+<p>The review also checked what the loader gets right. These properties were verified by tests or by the live run, and they should be kept through the fixes:</p>
+<ul>
+  <li><b>Readers never see a partial load.</b> Staging, reconciliation and a single-transaction publish mean a failure at any step leaves the live table untouched. The rollback path is covered by tests, and the swap was verified against SQL Server 2022.</li>
+  <li><b>Explicit, typed schema.</b> <code>TS_UTC DATETIME2(0)</code> is the primary key, measures are <code>FLOAT NOT NULL</code>, and <code>RISK_CLS_TXT</code> and <code>SYS_INGEST_FLAG</code> are protected by <code>CHECK</code> constraints. This replaces the original pandas-inferred table, which stored timestamps as text and had no key. Column names are unchanged for downstream users.</li>
+  <li><b>Data quality controls.</b> Nine row-level rules, duplicate detection across chunks, a quarantine CSV that records the reason for each rejection, and a configurable reject-ratio threshold that stops the run before anything is published.</li>
+  <li><b>Operability.</b> Every run is written to an audit table. Unchanged sources are skipped, with a guard for refresh mode against out-of-band edits. A session-scoped application lock blocks concurrent runs. Exit codes are documented (0/1/2/3), and <code>--dry-run</code> validates the CSV without needing the database or the ODBC driver.</li>
+  <li><b>Safe SQL construction.</b> Identifiers from configuration are checked against an allow-list and bracket-quoted, all values are passed as parameters, the password is held in a <code>SecretStr</code> that never appears in logs, and ODBC values are brace-escaped.</li>
+  <li><b>Speed.</b> Only the 9 needed columns are parsed, memory use is bounded by chunk size, and inserts are batched with <code>fast_executemany</code>. The live run loaded 32,065 rows over the network in 3.1&nbsp;s; validating the full file in dry-run mode takes 0.15&nbsp;s.</li>
+  <li><b>Tests.</b> 25 tests in <code>tests/test_legacy_ingest.py</code>: 24 offline, plus an integration test (opt-in with <code>LEGACY_DB_IT=1</code>) that runs refresh, skip and upsert against the real server and cleans up after itself.</li>
+</ul>
+
+<h2>5. Remediation Plan &amp; Exit Criteria</h2>
+<table>
+  <tr><th style="width:8%">ID</th><th>Fix</th><th style="width:9%">Effort</th><th style="width:24%">Gate</th></tr>
+  <tr><td>F-01</td><td>Publish by <code>TRUNCATE</code> + <code>ALTER TABLE … SWITCH</code>, drop constraint renaming, add a grant / schema-bound view integration test</td><td>M</td><td class="gate-go">Before GO</td></tr>
+  <tr><td>F-02</td><td>Run rollback, cleanup and audit update independently; finish audit on a fresh connection; mark stale <code>RUNNING</code> rows abandoned</td><td>S–M</td><td class="gate-go">Before GO</td></tr>
+  <tr><td>F-03</td><td>Bounded retry of the publish transaction on <code>40001</code> / 1205</td><td>S</td><td>First iteration after GO</td></tr>
+  <tr><td>F-04</td><td>Row-count check in upsert mode, or never skip upsert</td><td>S</td><td>First iteration after GO</td></tr>
+  <tr><td>F-05</td><td>Hash while parsing, one file handle</td><td>S</td><td>First iteration after GO</td></tr>
+  <tr><td>F-06</td><td>Check the header before connecting; keep exit 2 for config errors</td><td>S</td><td>First iteration after GO</td></tr>
+  <tr><td>F-07</td><td>Extract shared helpers into <code>common/</code>; revert or move the <code>rag/</code> change</td><td>S</td><td>First iteration after GO</td></tr>
+  <tr><td>F-08 – F-11</td><td>Report the reject file early; <code>is not None</code>; <code>fullmatch</code>; single-pass read and linear duplicate check</td><td>S each</td><td>Backlog</td></tr>
+</table>
+<p class="small muted">Effort: S = under half a day, M = about one day, including tests.</p>
+
+<h4>Exit criteria for GO</h4>
+<ol>
+  <li><code>test_F01_…</code> and <code>test_F02_…</code> pass and have been moved into <code>tests/test_legacy_ingest.py</code>.</li>
+  <li>The full suite is green: <code>venv/bin/python -m unittest discover -s tests</code>.</li>
+  <li>The integration test passes against a non-production SQL Server that has a <code>GRANT</code> on the table and a <code>VW_ACTIVE_FLEET</code> created <code>WITH SCHEMABINDING</code>. After a refresh, <code>USR_FDE_RO</code> can still query the view.</li>
+  <li>A connection-drop drill, where the network is cut during the bulk insert, leaves no <code>RUNNING</code> audit row and no <code>__STG</code> table after the next run.</li>
+</ol>
+
+<h2>Appendix A. How to Reproduce</h2>
+<p>From the repository root, with the project venv:</p>
+<pre style="border-left-color: var(--low)"># 1. Reproduce all open findings (expected today: Ran 11 tests … FAILED (failures=11))
+venv/bin/python -m unittest discover -s tests/open_findings -v
+
+# 2. Main suite stays green (open-findings folder has no __init__.py, so it is not discovered)
+venv/bin/python -m unittest discover -s tests
+
+# 3. Optional live check against the SQL Server in .env (creates and removes TBL_SC_FLEET_HIST_IT)
+LEGACY_DB_IT=1 venv/bin/python -m unittest tests.test_legacy_ingest.IntegrationTests -v
+
+# 4. Validate the source CSV without touching the database
+venv/bin/python scripts/ingest_legacy_data.py --dry-run</pre>
+
+<table>
+  <tr><th style="width:9%">Finding</th><th>Test (in <code>tests/open_findings/test_legacy_open_findings.py</code>)</th></tr>
+  <tr><td>F-01</td><td><code>test_F01_refresh_preserves_permissions_on_live_table</code></td></tr>
+  <tr><td>F-02</td><td><code>test_F02_dead_connection_during_failure_handling_still_returns_failed_report</code></td></tr>
+  <tr><td>F-03</td><td><code>test_F03_deadlock_victim_during_publish_is_retried</code></td></tr>
+  <tr><td>F-04</td><td><code>test_F04_upsert_does_not_skip_when_live_table_was_emptied</code></td></tr>
+  <tr><td>F-05</td><td><code>test_F05_audit_hash_matches_the_bytes_actually_loaded</code></td></tr>
+  <tr><td>F-06</td><td><code>test_F06_csv_missing_column_is_config_error_exit_2</code></td></tr>
+  <tr><td>F-07</td><td><code>test_F07_legacy_ingest_does_not_depend_on_rag</code></td></tr>
+  <tr><td>F-08</td><td><code>test_F08_failed_run_still_reports_written_reject_file</code></td></tr>
+  <tr><td>F-09</td><td><code>test_F09_chunk_rows_zero_is_rejected</code></td></tr>
+  <tr><td>F-10</td><td><code>test_F10_identifier_with_trailing_newline_is_rejected</code></td></tr>
+  <tr><td>F-11</td><td><code>test_F11_source_csv_is_read_in_a_single_pass</code></td></tr>
+</table>
+<p class="small muted">Environment used: Python 3.12.13, pandas 3.0.5, pyodbc 5.3.0, ODBC Driver 18 for SQL Server, SQL Server 2022 (Docker on EC2). When a finding is fixed, its test should start passing; move it into the main suite and mark the finding CLOSED in the next version of this report.</p>
+
+</body>
+</html>
