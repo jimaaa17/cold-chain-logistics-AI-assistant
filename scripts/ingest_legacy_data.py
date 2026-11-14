@@ -5,13 +5,20 @@ import os
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 
-# __file__ is 'experiment/phase-0/ingest_legacy_data.py'
-script_dir = Path(__file__).resolve().parent # points to experiment/phase-0
-project_root = script_dir.parents[0] # climbs up 1 levels to project root
+# Resolve project root relative to this script ('scripts/ingest_legacy_data.py')
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 
-load_dotenv(project_root / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
 
-data_path = project_root / "data" / "raw" / "dynamic_supply_chain_logistics_dataset.csv"
+DEFAULT_DATA_FILE = RAW_DATA_DIR / "dynamic_supply_chain_logistics_dataset.csv"
+data_path = Path(os.getenv("RAW_DATA_PATH", DEFAULT_DATA_FILE)).resolve()
+
+if not data_path.is_file():
+    raise FileNotFoundError(
+        f"Dataset not found at {data_path}. "
+        "Download it from the URL in 'data/source/data.txt' into 'data/raw/'."
+    )
 
 db_host = os.getenv("SQL_SERVER_HOST", "localhost")
 db_port = os.getenv("SQL_SERVER_PORT", "1433")
