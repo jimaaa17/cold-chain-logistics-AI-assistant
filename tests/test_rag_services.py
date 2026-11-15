@@ -337,5 +337,240 @@ class TestApiAndClient(RagTestCase):
         self.assertIn("[1] (sop.md - Operations > Cold-Chain SOP", answer)
 
 
+# ---- Code Review Findings (F-01 .. F-10) & Real SOP Asset Regression ------------------
+def _cli_exit_code(argv: list[str]) -> int | str:
+    from rag.ingestion import cli
+
+    try:
+        return cli.main(argv)
+    except SystemExit as exc:
+        return exc.code
+    except Exception as exc:
+        return f"crashed with {type(exc).__name__}"
+
+
+class _PineconeError(Exception):
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class _FakeHuggingFaceEmbeddings:
+    def __init__(self, **_):
+        pass
+
+    def embed_documents(self, texts):
+        return [[0.1] * 1024 for _ in texts]
+
+    def embed_query(self, text):
+        return [0.1] * 1024
+
+
+class _FakePineconeClient:
+    def __init__(self, existing_dimension: int) -> None:
+        self.indexes = {"fde-sop-index-local": existing_dimension}
+        self.delete_kwargs: dict = {}
+
+    def list_indexes(self):
+        return SimpleNamespace(names=lambda: list(self.indexes))
+
+    def describe_index(self, name):
+        return SimpleNamespace(dimension=self.indexes[name], host=f"{name}.host")
+
+    def delete_index(self, name, **kwargs):
+        self.delete_kwargs = kwargs
+        del self.indexes[name]
+
+    def create_index(self, name, dimension, **_):
+        self.indexes[name] = dimension
+
+    def Index(self, host):
+        return FakeIndex()
+
+
+class TestCodeReviewFindings(RagTestCase):
+    """Regression suite for F-01 through F-10 from materials/code-review/rag-code-review.pdf."""
+
+    def test_F01_document_with_no_text_is_failed_and_previous_version_kept(self):
+        doc = self.source / "sop.md"
+        doc.write_text(SOP_MD)
+        self.run_ingest()
+        before = self.ids()
+
+        doc.write_text("   \n\n  ")
+        report, _ = self.run_ingest()
+
+        self.assertIn("sop.md", report.failed)
+        self.assertEqual(self.ids(), before)
+
+    def test_F02_missing_pinecone_api_key_exits_2(self):
+        from rag.ingestion import cli
+
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             mock.patch.object(cli, "get_settings", lambda: Settings(_env_file=None)):
+            self.assertEqual(_cli_exit_code(["--dry-run"]), 2)
+
+    def test_F02_pinecone_auth_error_exits_2(self):
+        from rag.ingestion import cli
+
+        (self.source / "sop.md").write_text(SOP_MD)
+        unauthorized = _PineconeError(401, "Invalid API key")
+        with mock.patch.object(cli, "get_settings", lambda: self.settings()), \
+             mock.patch("rag.core.embeddings.build_embedder", return_value=SimpleNamespace(dimension=DIM)), \
+             mock.patch("rag.core.vector_store.connect_vector_store", side_effect=unauthorized):
+            self.assertEqual(_cli_exit_code([]), 2)
+
+    def test_F03_override_ignored_by_model_is_rejected_or_not_used(self):
+        import sys
+        from rag.core.embeddings import build_embedder
+
+        settings = Settings(_env_file=None, pinecone_api_key="x", embeddings_provider="LOCAL",
+                            local_embedding_device="cpu", embedding_dimensions=768)
+        fake_module = SimpleNamespace(HuggingFaceEmbeddings=_FakeHuggingFaceEmbeddings)
+        with mock.patch.dict(sys.modules, {"langchain_huggingface": fake_module}):
+            embedder = build_embedder(settings)
+        self.assertEqual(embedder.dimension, 1024)
+
+    def test_F04_long_csv_row_respects_chunk_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "procedures.csv"
+            path.write_text("step,procedure\n1," + "Restart the auxiliary cooling unit. " * 150 + "\n")
+            chunks = parse_document(path, chunk_size=600, chunk_overlap=60)
+        self.assertGreater(len(chunks), 1)
+        self.assertLessEqual(max(len(c.text) for c in chunks), 600)
+        self.assertTrue(all(c.text.startswith("step: 1 | ") for c in chunks))
+        self.assertTrue(all(c.metadata.get("row_index") == 0 for c in chunks))
+
+    def test_F05_invalid_worker_counts_are_rejected(self):
+        from rag.ingestion import cli
+
+        (self.source / "sop.md").write_text(SOP_MD)
+        for workers in ("-1", "0", "500"):
+            with self.subTest(workers=workers), mock.patch.object(cli, "get_settings", lambda: self.settings()):
+                self.assertEqual(_cli_exit_code(["--workers", workers, "--dry-run"]), 2)
+
+    def test_F08_delete_index_waits_for_deletion(self):
+        import sys
+        from rag.core.vector_store import connect_vector_store
+
+        client = _FakePineconeClient(existing_dimension=1536)
+        fake_module = SimpleNamespace(Pinecone=lambda api_key: client, ServerlessSpec=lambda **kw: kw)
+        settings = Settings(_env_file=None, pinecone_api_key="x", allow_index_recreate=True)
+        with mock.patch.dict(sys.modules, {"pinecone": fake_module}):
+            connect_vector_store(settings, 1024, provision=True)
+        self.assertNotIn("timeout", client.delete_kwargs)
+        self.assertEqual(client.indexes["fde-sop-index-local"], 1024)
+
+    def test_F10_plan_builds_a_constant_number_of_sets(self):
+        files = {f"sop_{i}.md": Path(f"sop_{i}.md") for i in range(200)}
+        settings = Settings(_env_file=None, pinecone_api_key="x")
+        calls = 0
+
+        def counting_set(*args):
+            nonlocal calls
+            calls += 1
+            return set(*args)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("rag.ingestion.pipeline.discover_documents", return_value=files), \
+             mock.patch("rag.ingestion.pipeline.sha256_file", return_value="hash"), \
+             mock.patch("rag.ingestion.pipeline.set", counting_set, create=True):
+            build_plan(settings, Manifest(Path(tmp) / "m.json", "fp"), full_rebuild=True)
+        self.assertLessEqual(calls, 5)
+
+
+@unittest.skipIf(TestClient is None, "fastapi not installed")
+class TestCodeReviewApiFindings(RagTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.source / "sop.md").write_text(SOP_MD)
+        self.run_ingest()
+        self.http = self.client_for(self.index)
+
+    def client_for(self, index) -> TestClient:
+        from rag.retrieval.api import create_app
+
+        service = RetrievalService(Embedder(self.backend, "fake-model", dimension=DIM), VectorStore(index, "sop"))
+        client = TestClient(create_app(lambda: service))
+        client.__enter__()
+        self.addCleanup(client.__exit__, None, None, None)
+        return client
+
+    def tool_via_api(self):
+        import httpx
+        from rag.retrieval.client import RetrievalClient, make_sop_search_tool
+
+        def forward(request: httpx.Request) -> httpx.Response:
+            r = self.http.request(request.method, request.url.path, content=request.content,
+                                  headers={"content-type": "application/json"})
+            return httpx.Response(r.status_code, content=r.content, headers=r.headers)
+
+        return make_sop_search_tool(RetrievalClient("http://rag", transport=httpx.MockTransport(forward)))
+
+    def test_F06_invalid_filter_returns_4xx_not_503(self):
+        with mock.patch.object(self.index, "query", side_effect=_PineconeError(400, "Invalid filter operator $badop")):
+            response = self.http.post("/v1/retrieve",
+                                      json={"query": "temperature", "filter": {"section": {"$badop": 1}}})
+        self.assertIn(response.status_code, (400, 422))
+
+    def test_F07_rejected_query_is_not_reported_as_knowledge_base_down(self):
+        from rag.retrieval.client import QUERY_REJECTED_MESSAGE, UNAVAILABLE_MESSAGE
+
+        answer = self.tool_via_api().invoke({"query": "temperature breach " * 150})
+        self.assertNotEqual(answer, UNAVAILABLE_MESSAGE)
+        self.assertEqual(answer, QUERY_REJECTED_MESSAGE)
+
+    def test_F07_malformed_response_degrades_instead_of_raising(self):
+        import httpx
+        from rag.retrieval.client import UNAVAILABLE_MESSAGE, RetrievalClient, make_sop_search_tool
+
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=[]))
+        tool = make_sop_search_tool(RetrievalClient("http://rag", transport=transport))
+        answer = tool.invoke({"query": "temperature"})
+        self.assertEqual(answer, UNAVAILABLE_MESSAGE)
+
+    def test_F09_readyz_fails_when_namespace_is_empty(self):
+        response = self.client_for(FakeIndex()).get("/readyz")
+        self.assertEqual(response.status_code, 503)
+
+
+@unittest.skipIf(TestClient is None, "fastapi not installed")
+class TestRealSopAssetEndToEnd(RagTestCase):
+    """End-to-end regression test on data/policy/Cold_Chain_Incident_SOP_v2.md."""
+
+    def test_real_sop_policy_ingest_and_retrieve_lifecycle(self):
+        import httpx
+        from rag.config import PROJECT_ROOT
+        from rag.retrieval.api import create_app
+        from rag.retrieval.client import RetrievalClient, make_sop_search_tool
+
+        real_policy_dir = PROJECT_ROOT / "data" / "policy"
+        real_sop = real_policy_dir / "Cold_Chain_Incident_SOP_v2.md"
+        self.assertTrue(real_sop.is_file(), f"Missing real SOP asset at {real_sop}")
+
+        settings = self.settings(sop_source_dir=real_policy_dir)
+        report, manifest = self.run_ingest(settings)
+        self.assertTrue(report.ok, f"Real SOP ingestion failed: {report.failed}")
+        self.assertIn("Cold_Chain_Incident_SOP_v2.md", report.processed)
+        self.assertEqual(report.chunks_upserted, 4)
+        self.assertIn("Cold_Chain_Incident_SOP_v2.md", manifest.documents)
+
+        service = RetrievalService(Embedder(self.backend, "fake-model", dimension=DIM), VectorStore(self.index, "sop"))
+        with TestClient(create_app(lambda: service)) as http:
+            ready = http.get("/readyz")
+            self.assertEqual(ready.status_code, 200)
+            self.assertEqual(ready.json()["vector_count"], 4)
+
+            def forward(request: httpx.Request) -> httpx.Response:
+                r = http.request(request.method, request.url.path, content=request.content,
+                                 headers={"content-type": "application/json"})
+                return httpx.Response(r.status_code, content=r.content, headers=r.headers)
+
+            tool = make_sop_search_tool(RetrievalClient("http://rag", transport=httpx.MockTransport(forward)), top_k=3)
+            output = tool.invoke({"query": "Fresh Perishables 4.0°C critical breach"})
+            self.assertIn("Cold_Chain_Incident_SOP_v2.md", output)
+            self.assertIn("Southern California Logistics Operations", output)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FDE Supply Chain Dispatch Console — Product Design Mockup v1</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #0B0E14; color: #E2E8F0; font-family: Inter, system-ui, -apple-system, sans-serif; }
+    .surface-sidebar { background-color: #111622; border-right: 1px solid #1E293B; }
+    .surface-card { background-color: #111622; border: 1px solid #1E293B; }
+    .code-pill { background-color: #1E293B; color: #38BDF8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body class="min-h-screen flex">
+  <!-- Static Product Design Reference Mockup for FE/ -->
+  <aside class="w-72 surface-sidebar p-5 flex flex-col justify-between">
+    <div class="space-y-6">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-400/30 flex items-center justify-center text-xl">🧊</div>
+        <div>
+          <h1 class="font-bold text-base text-slate-100">FDE Command Center</h1>
+          <p class="text-xs text-slate-400">Control Tower v2.0 (FE)</p>
+        </div>
+      </div>
+      <nav class="space-y-2">
+        <div class="px-3 py-2.5 rounded-lg bg-sky-500/15 border border-sky-400/40 text-sky-300 text-sm font-medium">
+          🧊 Dispatch Console
+        </div>
+        <div class="px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 text-sm font-medium">
+          🛡️ Security &amp; Audit Logs
+        </div>
+      </nav>
+      <div class="pt-4 border-t border-slate-800 space-y-2 text-xs">
+        <div class="flex justify-between text-slate-400">
+          <span>Session Token</span>
+          <span class="code-pill px-1.5 py-0.5 rounded">a8f391c2...</span>
+        </div>
+        <div class="flex justify-between text-slate-400">
+          <span>Reasoning LLM</span>
+          <span class="code-pill px-1.5 py-0.5 rounded">GEMINI</span>
+        </div>
+      </div>
+    </div>
+    <button class="w-full py-2 px-3 rounded-lg border border-rose-500/40 bg-rose-500/10 text-rose-300 text-xs font-medium hover:bg-rose-500/20">
+      🗑️ Purge Dispatch Workspace Session
+    </button>
+  </aside>
+
+  <main class="flex-1 p-8 space-y-6">
+    <header class="border-b border-slate-800 pb-4 flex items-center justify-between">
+      <div>
+        <h2 class="text-2xl font-bold text-slate-100">Cold-Chain Incident Control Dashboard</h2>
+        <p class="text-sm text-slate-400">Production Data Engineering Pipeline • Real-Time Decision Optimization Platform</p>
+      </div>
+      <div class="flex gap-3 text-xs">
+        <div class="surface-card px-3 py-2 rounded-lg">
+          <span class="text-slate-400 block">Excursion Threshold</span>
+          <span class="font-mono text-sky-400 font-semibold">IOT_TEMP_VAL_C &gt; 4.0°C</span>
+        </div>
+        <div class="surface-card px-3 py-2 rounded-lg">
+          <span class="text-slate-400 block">Congestion Gate</span>
+          <span class="font-mono text-amber-400 font-semibold">PRT_CNG_LVL &gt; 7.0</span>
+        </div>
+        <div class="surface-card px-3 py-2 rounded-lg">
+          <span class="text-slate-400 block">Delay Risk Gate</span>
+          <span class="font-mono text-rose-400 font-semibold">DELAY_PROB_DEC &gt; 0.65</span>
+        </div>
+      </div>
+    </header>
+  </main>
+</body>
+</html>

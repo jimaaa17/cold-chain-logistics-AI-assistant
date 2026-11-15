@@ -1,6 +1,8 @@
 # Python 3.12.13
 altair==6.2.2
 faiss-cpu==1.15.0
+fastapi==0.162.7
+httpx==0.28.1
 langchain-community==0.4.2
 langchain-google-genai==4.5.0
 langchain-huggingface==1.2.2
@@ -23,3 +25,4 @@ SQLAlchemy==2.0.52
 streamlit==1.62.0
 tenacity>=8.2.3,<9.2.0
 torch==2.13.0
+uvicorn==0.54.0
