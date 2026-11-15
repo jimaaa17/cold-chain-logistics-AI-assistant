@@ -120,7 +120,7 @@ if app_mode == "🧊 Dispatch Console":
     # ------------------------------------------
     # TAB 1: CHAT UI & AGENT EXECUTION
     # ------------------------------------------
-    st.title("Cold-Chain Incident Control Dashboard")
+    st.title("Cold-Chain Incident Control Dashboard(Update)")
     st.caption("Production Data Engineering Pipeline • Real-Time Decision Optimization Platform")
 
     for entry in st.session_state.ui_messages:

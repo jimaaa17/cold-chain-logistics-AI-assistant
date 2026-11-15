@@ -175,3 +175,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run src/ui.py
 ```
+
+- Add Microsoft GPG key
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+
+- Add the Microsoft Ubuntu repository (auto-detects Ubuntu 22.04 or 24.04)
+curl -fsSL https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+
+- Update apt and install ODBC Driver 18 + unixODBC dev headers
+sudo apt-get update
+sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+- Install the unixODBC dev headers
+sudo apt-get install unixodbc-dev
