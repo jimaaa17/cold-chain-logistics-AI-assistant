@@ -188,3 +188,31 @@ sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
 
 - Install the unixODBC dev headers
 sudo apt-get install unixodbc-dev
+
+5. Create the systemd service file
+```
+sudo nano /etc/systemd/system/streamlit.service
+```
+
+6. Paste the configuration
+```
+[Unit]
+Description=Streamlit Cold-Chain Dispatch Console
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cold-chain-logistics-FDE-Project
+ExecStart=/home/ubuntu/cold-chain-logistics-FDE-Project/venv/bin/streamlit run src/ui.py --server.port=8501 --server.address=0.0.0.0
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+7. Register and start the service
+```
+sudo systemctl daemon-reload
+sudo systemctl enable streamlit
+sudo systemctl start streamlit
+```

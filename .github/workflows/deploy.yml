@@ -1,4 +1,4 @@
-name: Enterprise Manual Deploy
+name: Cold Chain Logistics AI Assistant - Manual Deploy
 
 on:
   workflow_dispatch:
