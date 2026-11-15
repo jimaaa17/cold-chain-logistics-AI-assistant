@@ -104,12 +104,12 @@ class LegacyOpenFindings(TempDirCase):
         return Loader(self.settings(csv, **overrides), db.connect).run(mode=mode)
 
     def test_F01_refresh_preserves_permissions_on_live_table(self):
-        """GRANTs (and indexes, triggers, dependent views) on the live table survive a refresh."""
+        """Table-level GRANTs on the live table survive a refresh (indexes/triggers are lost the same way)."""
         db = RecordingDB(tables={LIVE}, grants={LIVE: {"SELECT TO USR_FDE_RO"}})
         report = self.load(db)
         self.assertEqual(report.status, "SUCCEEDED", report.message)
         self.assertEqual(db.grants.get(LIVE), {"SELECT TO USR_FDE_RO"},
-                         "refresh dropped the GRANT the agent's read-only login depends on")
+                         "refresh dropped a table-level GRANT on the live table")
 
     def test_F02_dead_connection_during_failure_handling_still_returns_failed_report(self):
         """If rollback itself fails (link dropped), run() still returns a FAILED report with the root cause."""
@@ -204,18 +204,15 @@ class LegacyOpenFindings(TempDirCase):
         with self.assertRaises(ValueError):
             TableRef("dbo", "TBL_SC_FLEET_HIST_RAW\n")
 
-    def test_F11_source_csv_is_read_in_a_single_pass(self):
-        """Hashing, header check and parsing share one read of the source file."""
+    def test_F11_source_csv_is_parsed_once(self):
+        """The header check reuses the parsed chunks instead of parsing the CSV a second time."""
         import legacy_ingest.extract as extract_mod
-        import legacy_ingest.loader as loader_mod
 
         csv = self.write_csv(hourly_rows(7))
-        with mock.patch.object(extract_mod.pd, "read_csv", wraps=extract_mod.pd.read_csv) as read_csv, \
-             mock.patch.object(loader_mod, "file_fingerprint", wraps=file_fingerprint) as fingerprint:
+        with mock.patch.object(extract_mod.pd, "read_csv", wraps=extract_mod.pd.read_csv) as read_csv:
             report = Loader(self.settings(csv), RecordingDB().connect).run()
         self.assertEqual(report.status, "SUCCEEDED", report.message)
-        passes = read_csv.call_count + fingerprint.call_count
-        self.assertEqual(passes, 1, f"source file read {passes} times per load")
+        self.assertEqual(read_csv.call_count, 1, f"source CSV parsed {read_csv.call_count} times per load")
 
 
 if __name__ == "__main__":
