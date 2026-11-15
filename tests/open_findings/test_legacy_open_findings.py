@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(REPO), str(REPO / "tests")]
+sys.path[:0] = [str(REPO / "BE"), str(REPO), str(REPO / "tests")]
 
 from test_legacy_ingest import (  # noqa: E402
     LIVE,
@@ -173,7 +173,7 @@ class LegacyOpenFindings(TempDirCase):
         import ast
 
         offenders = []
-        for path in sorted((REPO / "legacy_ingest").glob("*.py")):
+        for path in sorted((REPO / "BE" / "legacy_ingest").glob("*.py")):
             for node in ast.walk(ast.parse(path.read_text())):
                 names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
                         [node.module or ""] if isinstance(node, ast.ImportFrom) else []

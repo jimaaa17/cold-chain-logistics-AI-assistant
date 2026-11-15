@@ -1,0 +1,9 @@
+[project]
+name = "cold-chain-logistics-ai-assistant"
+version = "2.1.0"
+description = "Cold-Chain Logistics AI Control Tower (BE/ + FE/ Monorepo)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "BE"]
+testpaths = ["tests"]

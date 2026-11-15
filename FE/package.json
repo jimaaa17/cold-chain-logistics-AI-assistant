@@ -1,0 +1,25 @@
+{
+  "name": "fde-cold-chain-fe",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Modular Cold-Chain Incident Control & AI Dispatch Console (FE)",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --port 5173",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "vite": "^6.0.1",
+    "vitest": "^2.1.5"
+  }
+}

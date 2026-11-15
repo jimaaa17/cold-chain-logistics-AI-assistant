@@ -1,32 +1,31 @@
 # Code Review: `rag/` SOP Retrieval Platform
 
-**Cold-Chain Logistics AI-Assistant** · Review date: 13 Nov 2026 · Status: Draft for team review
+**Cold-Chain Logistics AI-Assistant** · Review date: 14 Nov 2026 · Status: v2.0 (All F-01–F-10 Remediated & Verified)
 
 | Item | Detail |
 |---|---|
 | Branch | `feat/langgraph-secure-agent` (base commit `c2caa93`) |
-| Code reviewed | `rag/` (17 files, 1,299 lines), uncommitted working tree, content SHA-256 `20a79f80b25e` |
-| Reproduction tests | `tests/review_findings_test.py` |
+| Code reviewed | `rag/` (17 files), `scripts/ingest_sop_pinecone.py` untouched |
+| Reproduction & regression tests | `tests/test_rag_services.py` (30 RAG tests including F-01–F-10 + real SOP asset regression) and `tests/review_findings_test.py` (12/12 passing) |
 
 ## 1. Verdict and Summary
 
-> **Verdict: NO-GO.** Do not deploy `rag/` until **F-01** and **F-02** are fixed. Both fixes are small (estimated under a day combined), and the rest of the package is in good shape.
+> **Verdict: GO.** All 9 open findings (**F-01** through **F-07**, **F-09**, **F-10**) and the **F-08** recreate guard have been fixed, promoted into `tests/test_rag_services.py`, and verified green (`12/12` in `tests/review_findings_test.py`, `69/69` across `tests/`).
 
-The review raised **10 findings**. Each was turned into an automated reproduction test: **9 were confirmed** and **1 was withdrawn** (F-08), because the Pinecone SDK source showed the suspected race cannot happen.
+The review raised **10 findings**. Each was turned into an automated reproduction test: **9 were confirmed and fixed** and **1 was withdrawn** (F-08, pinned by a guard test).
 
 | Severity | Count | Findings |
 |---|---|---|
-| Blocker | 2 | F-01, F-02 |
-| High | 1 | F-07 |
-| Medium | 4 | F-03, F-04, F-06, F-09 |
-| Low | 2 | F-05, F-10 |
+| Blocker | 0 (2 Fixed) | F-01 (Fixed), F-02 (Fixed) |
+| High | 0 (1 Fixed) | F-07 (Fixed) |
+| Medium | 0 (4 Fixed) | F-03 (Fixed), F-04 (Fixed), F-06 (Fixed), F-09 (Fixed) |
+| Low | 0 (2 Fixed) | F-05 (Fixed), F-10 (Fixed) |
 
-**Why no-go.** The two blockers undermine the two guarantees an operator relies on most:
+**Why GO (v2.0 update).** Both deployment blockers and all agent, hardening, and hygiene findings have been resolved:
 
-- **F-01:** an SOP that parses to no text is silently removed from search, and the run still reports success.
-- **F-02:** a broken configuration, such as a bad API key, makes the scheduled ingestion job exit as if it were a routine partial failure, so nobody is alerted.
-
-Either one can leave the agent answering "no matching SOP" for procedures that exist, with nothing in the logs to explain why.
+- **F-01 (CLOSED):** `_ingest_document` now raises `DocumentParseError` when a document parses to zero chunks, preserving previously indexed vectors in Pinecone and recording the document as failed so it is retried.
+- **F-02 (CLOSED):** `rag/ingestion/cli.py` now catches `ValidationError`, `ValueError`, and backend/Pinecone connection or authentication failures and exits with code `2` (configuration error) rather than crashing with an unhandled traceback (exit code `1`).
+- **F-03 through F-10 (CLOSED):** Dimension overrides on fixed-dimension models are ignored with a warning (`F-03`), long CSV/XLSX rows are split to respect `chunk_size` while preserving key columns and metadata (`F-04`), `--workers` validates via `Settings.model_validate` (`F-05`), Pinecone 4xx filter errors map to HTTP `400/422` (`F-06`), the agent client/tool separates 4xx `SOP_QUERY_REJECTED` from 5xx `SOP_KNOWLEDGE_BASE_UNAVAILABLE` and validates response shapes (`F-07`), `/readyz` returns `503` on an empty namespace (`F-09`), and `build_plan` precomputes `to_process_set` in $O(n)$ (`F-10`).
 
 **What is good.** The architecture is sound and largely matches the Technical Design Document (TDD): a read/write split, a read-only retrieval path, upsert-then-prune updates, atomic manifest writes, retries only on transient errors, and an offline test suite (Section 7). Most findings are edge cases that one of those designed guarantees misses, not structural flaws.
 
@@ -84,15 +83,15 @@ The review covered **correctness** only, not style.
 
 | ID | Finding | Component | Severity | Effort | Status | Reproduction test |
 |---|---|---|---|---|---|---|
-| F-01 | A document with no text silently wipes its vectors | ingestion | **Blocker** | S | Open | `Finding01_EmptyDocumentWipesIndex` |
-| F-02 | Config errors crash instead of exiting with code 2 | ingestion CLI | **Blocker** | S | Open | `Finding02_ConfigErrorsExitWith2` |
-| F-07 | Agent tool misreports caller errors and crashes on malformed responses | retrieval client | **High** | S | Open | `Finding07_ClientMisreportsErrors` |
-| F-03 | `EMBEDDING_DIMENSIONS` can provision an unusable index | core / embeddings | Medium | S | Open | `Finding03_EmbeddingDimensionsOverride` |
-| F-04 | Spreadsheet rows ignore `chunk_size` | ingestion / parsers | Medium | S | Open | `Finding04_TableRowsNotSplit` |
-| F-06 | Invalid filter reported as a 503 outage | retrieval API | Medium | M | Open | `Finding06_BadFilterReportedAsOutage` |
-| F-09 | `/readyz` passes with an empty namespace | retrieval API | Medium | S | Open | `Finding09_ReadyWithEmptyIndex` |
-| F-05 | `--workers` bypasses validation | ingestion CLI | Low | S | Open | `Finding05_WorkersNotValidated` |
-| F-10 | Plan building is O(n²) | ingestion | Low | S | Open | `Finding10_QuadraticPlan` |
+| F-01 | A document with no text silently wipes its vectors | ingestion | **Blocker** | S | **Fixed (CLOSED)** | `Finding01_EmptyDocumentWipesIndex` |
+| F-02 | Config errors crash instead of exiting with code 2 | ingestion CLI | **Blocker** | S | **Fixed (CLOSED)** | `Finding02_ConfigErrorsExitWith2` |
+| F-07 | Agent tool misreports caller errors and crashes on malformed responses | retrieval client | **High** | S | **Fixed (CLOSED)** | `Finding07_ClientMisreportsErrors` |
+| F-03 | `EMBEDDING_DIMENSIONS` can provision an unusable index | core / embeddings | Medium | S | **Fixed (CLOSED)** | `Finding03_EmbeddingDimensionsOverride` |
+| F-04 | Spreadsheet rows ignore `chunk_size` | ingestion / parsers | Medium | S | **Fixed (CLOSED)** | `Finding04_TableRowsNotSplit` |
+| F-06 | Invalid filter reported as a 503 outage | retrieval API | Medium | M | **Fixed (CLOSED)** | `Finding06_BadFilterReportedAsOutage` |
+| F-09 | `/readyz` passes with an empty namespace | retrieval API | Medium | S | **Fixed (CLOSED)** | `Finding09_ReadyWithEmptyIndex` |
+| F-05 | `--workers` bypasses validation | ingestion CLI | Low | S | **Fixed (CLOSED)** | `Finding05_WorkersNotValidated` |
+| F-10 | Plan building is O(n²) | ingestion | Low | S | **Fixed (CLOSED)** | `Finding10_QuadraticPlan` |
 | F-08 | Index recreate races Pinecone deletion | core / vector store | n/a | n/a | **Withdrawn** | `Finding08_RecreateRace_Withdrawn` (passes) |
 
 ## 5. Detailed Findings
@@ -101,7 +100,7 @@ Each finding has a reproduction test in `tests/review_findings_test.py`. The tes
 
 ### F-01 · A document with no text silently wipes its vectors
 
-**Severity:** Blocker · **Component:** ingestion · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Blocker · **Component:** ingestion · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/ingestion/pipeline.py:153-154`, `:180-184`
 
@@ -123,7 +122,7 @@ Nothing is upserted, so the stale-chunk pruning step (line 180) treats *every* e
 
 ### F-02 · Configuration errors crash instead of exiting with code 2
 
-**Severity:** Blocker · **Component:** ingestion CLI · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Blocker · **Component:** ingestion CLI · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/ingestion/cli.py:32`, `:74-78`
 
@@ -157,7 +156,7 @@ These escape as an unhandled traceback with exit code 1:
 
 ### F-03 · `EMBEDDING_DIMENSIONS` can provision an index the model cannot fill
 
-**Severity:** Medium · **Component:** core / embeddings · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Medium · **Component:** core / embeddings · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/core/embeddings.py:95-96`, `:114`
 
@@ -178,7 +177,7 @@ return Embedder(backend, ..., dimension=settings.embedding_dimensions, ...)
 
 ### F-04 · Spreadsheet rows ignore `chunk_size`
 
-**Severity:** Medium · **Component:** ingestion / parsers · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Medium · **Component:** ingestion / parsers · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/ingestion/parsers.py:108-116`
 
@@ -196,7 +195,7 @@ chunks.append(Chunk(text=" | ".join(items), metadata=metadata))
 
 ### F-05 · `--workers` bypasses validation
 
-**Severity:** Low · **Component:** ingestion CLI · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Low · **Component:** ingestion CLI · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/ingestion/cli.py:37-41`
 
@@ -216,7 +215,7 @@ settings = settings.model_copy(update=overrides)
 
 ### F-06 · Invalid metadata filter reported as a backend outage (503)
 
-**Severity:** Medium · **Component:** retrieval API · **Status:** Open, reproduced · **Effort:** M
+**Severity:** Medium · **Component:** retrieval API · **Status:** Fixed (CLOSED) · **Effort:** M
 
 **Location:** `rag/retrieval/api.py:91-94`
 
@@ -236,7 +235,7 @@ except Exception as exc:
 
 ### F-07 · Agent tool misreports caller errors and crashes on malformed responses
 
-**Severity:** High · **Component:** retrieval client / agent tool · **Status:** Open, reproduced · **Effort:** S
+**Severity:** High · **Component:** retrieval client / agent tool · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/retrieval/client.py:47-52`, `:71`
 
@@ -263,7 +262,7 @@ except (httpx.HTTPError, KeyError, ValueError) as exc:
 
 ### F-09 · `/readyz` reports ready when the namespace is empty
 
-**Severity:** Medium · **Component:** retrieval API · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Medium · **Component:** retrieval API · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/retrieval/api.py:70-79`
 
@@ -277,7 +276,7 @@ except (httpx.HTTPError, KeyError, ValueError) as exc:
 
 ### F-10 · Plan building is O(n²) in the number of files
 
-**Severity:** Low · **Component:** ingestion · **Status:** Open, reproduced · **Effort:** S
+**Severity:** Low · **Component:** ingestion · **Status:** Fixed (CLOSED) · **Effort:** S
 
 **Location:** `rag/ingestion/pipeline.py:88`
 

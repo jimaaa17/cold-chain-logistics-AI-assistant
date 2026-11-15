@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FDE Control Tower v2.1 — Langfuse Traceability + SQL AgentAuditLog Mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #0B0E14; color: #E2E8F0; font-family: Inter, system-ui, -apple-system, sans-serif; }
+    .surface-sidebar { background-color: #111622; border-right: 1px solid #1E293B; }
+    .surface-card { background-color: #111622; border: 1px solid #1E293B; }
+    .code-pill { background-color: #1E293B; color: #38BDF8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body class="min-h-screen flex">
+  <!-- Sidebar -->
+  <aside class="w-72 surface-sidebar p-5 flex flex-col justify-between shrink-0">
+    <div class="space-y-6">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-400/30 flex items-center justify-center text-xl">🧊</div>
+        <div>
+          <h1 class="font-bold text-base text-slate-100">FDE Command Center</h1>
+          <p class="text-xs text-slate-400">Langfuse + SQL Audit v2.1</p>
+        </div>
+      </div>
+
+      <nav class="space-y-2">
+        <div class="px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 text-sm font-medium">
+          🧊 Dispatch Console
+        </div>
+        <div class="px-3 py-2.5 rounded-lg bg-sky-500/15 border border-sky-400/40 text-sky-300 text-sm font-medium">
+          🛡️ Traceability &amp; Audit Ledger
+        </div>
+      </nav>
+
+      <div class="pt-4 border-t border-slate-800 space-y-2.5 text-xs">
+        <div class="flex justify-between items-center text-slate-400">
+          <span>Session Token</span>
+          <span class="code-pill px-1.5 py-0.5 rounded">sess-94f2a1...</span>
+        </div>
+        <div class="flex justify-between items-center text-slate-400">
+          <span>SQL Ledger</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/30 text-emerald-300 font-mono">FDE_VIEWS.AgentAuditLog</span>
+        </div>
+        <div class="flex justify-between items-center text-slate-400">
+          <span>Langfuse Sink</span>
+          <span class="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/30 text-sky-300 font-mono">ACTIVE (Dual-Sink)</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Workspace -->
+  <main class="flex-1 p-8 space-y-6 overflow-y-auto">
+    <header class="border-b border-slate-800 pb-4 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h2 class="text-2xl font-bold text-slate-100">🛡️ Dual-Sink Agent Traceability &amp; Compliance Ledger</h2>
+        <p class="text-xs text-slate-400 mt-1">
+          Combines <code class="text-sky-400">Langfuse</code> hierarchical LLM/Tool spans with the append-only MSSQL compliance ledger <code class="text-emerald-400">FDE_VIEWS.AgentAuditLog</code> (<code class="text-slate-300">GRANT INSERT TO USR_FDE_RO</code>)
+        </p>
+      </div>
+      <div class="flex items-center gap-2 text-xs">
+        <span class="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-mono">
+          RBAC: USR_FDE_RO (INSERT-ONLY)
+        </span>
+        <span class="px-3 py-1.5 rounded-lg bg-sky-500/10 border border-sky-500/30 text-sky-300 font-mono">
+          Trace ID: tr-8f41c09e2b
+        </span>
+      </div>
+    </header>
+
+    <!-- View Mode Switcher: Langfuse Waterfall vs SQL Compliance Table -->
+    <div class="flex items-center justify-between">
+      <div class="inline-flex rounded-xl bg-[#111622] border border-slate-800 p-1 text-xs">
+        <button class="px-3.5 py-1.5 rounded-lg bg-sky-500 text-slate-950 font-semibold">
+          🔭 Langfuse Trace Waterfall (Spans &amp; Latency)
+        </button>
+        <button class="px-3.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200">
+          🗄️ SQL Server Ledger (FDE_VIEWS.AgentAuditLog)
+        </button>
+      </div>
+      <div class="text-xs text-slate-400 font-mono">
+        Total Turn Latency: <span class="text-sky-400 font-semibold">1,420 ms</span> • Spans: <span class="text-slate-200">5</span>
+      </div>
+    </div>
+
+    <!-- Split Grid: Trace Waterfall + Span/SQL Inspector -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+      <div class="lg:col-span-8 surface-card rounded-2xl p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <span class="text-xs font-mono text-sky-400">TRACE #tr-8f41c09e2b</span>
+            <h3 class="text-sm font-semibold text-slate-100 mt-0.5">
+              "Find active shipments near Los Angeles, check local weather, and verify SOP compliance."
+            </h3>
+          </div>
+          <span class="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono">
+            SYNCED TO SQL + LANGFUSE
+          </span>
+        </div>
+
+        <!-- Waterfall Bars -->
+        <div class="space-y-2.5 font-mono text-xs">
+          <div class="p-3 rounded-xl bg-slate-900/80 border border-sky-500/40 space-y-1.5">
+            <div class="flex justify-between">
+              <span class="text-amber-300">[SPAN 1] reasoner → query_telemetry_db</span>
+              <span class="text-slate-400">0 ms – 310 ms (310 ms)</span>
+            </div>
+            <div class="w-full h-2 bg-slate-800 rounded overflow-hidden">
+              <div class="h-full bg-amber-400" style="width: 22%"></div>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+            <div class="flex justify-between">
+              <span class="text-emerald-300">[SPAN 2] tools → query_telemetry_db (VW_ACTIVE_FLEET)</span>
+              <span class="text-slate-400">310 ms – 540 ms (230 ms)</span>
+            </div>
+            <div class="w-full h-2 bg-slate-800 rounded overflow-hidden">
+              <div class="h-full bg-emerald-400" style="margin-left: 22%; width: 16%"></div>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+            <div class="flex justify-between">
+              <span class="text-emerald-300">[SPAN 3] tools → fetch_corridor_conditions + search_compliance_sop</span>
+              <span class="text-slate-400">540 ms – 980 ms (440 ms)</span>
+            </div>
+            <div class="w-full h-2 bg-slate-800 rounded overflow-hidden">
+              <div class="h-full bg-sky-400" style="margin-left: 38%; width: 31%"></div>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+            <div class="flex justify-between">
+              <span class="text-sky-300">[SPAN 4] reasoner_final → LLM Text Synthesis</span>
+              <span class="text-slate-400">980 ms – 1420 ms (440 ms)</span>
+            </div>
+            <div class="w-full h-2 bg-slate-800 rounded overflow-hidden">
+              <div class="h-full bg-indigo-400" style="margin-left: 69%; width: 31%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inspector Drawer -->
+      <div class="lg:col-span-4 surface-card rounded-2xl p-5 space-y-3 text-xs">
+        <h4 class="font-semibold text-slate-200 uppercase tracking-wider">Span &amp; SQL Audit Inspector</h4>
+        <div class="space-y-1.5 font-mono text-slate-400 border-b border-slate-800 pb-3">
+          <div class="flex justify-between"><span>SQL LogID:</span><span class="text-slate-200">#1042</span></div>
+          <div class="flex justify-between"><span>Trace ID:</span><span class="text-sky-400">tr-8f41c09e2b</span></div>
+          <div class="flex justify-between"><span>Span ID:</span><span class="text-sky-400">sp-29a01c</span></div>
+          <div class="flex justify-between"><span>NodeExecuted:</span><span class="text-amber-300">reasoner</span></div>
+          <div class="flex justify-between"><span>ToolName:</span><span class="text-sky-300">query_telemetry_db</span></div>
+        </div>
+        <pre class="p-3 rounded-xl bg-[#0B0E14] border border-slate-800 text-sky-300 overflow-x-auto font-mono text-[11px] leading-relaxed">{
+  "trace_id": "tr-8f41c09e2b",
+  "span_id": "sp-29a01c",
+  "elapsed_ms": 310,
+  "args": {
+    "sql_query": "SELECT TOP 10 * FROM FDE_VIEWS.VW_ACTIVE_FLEET"
+  }
+}</pre>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
