@@ -97,3 +97,81 @@ docker run -v mssql_data:/var/opt/mssql \
 
 # Phase 1
 - Get API key for Pinecone and GEMINI
+- use it in .env
+- run scripts/ingest_sop_pinecone.py
+
+# Phase 2
+## Data Security
+
+- Click on file: scripts/setup_security_view.sql
+- VS-code will show you start button directly on top else run like we were running the commands previously.
+- Once done, create a new connection now with Agent-Profile
+
+```
+* Profile Name: agent-fde-ro
+* Connection Group: Leace it on <Default>
+* Input type: Select Parameters (DO not click "Load from Connection String", "Browse AZure", or "Browse Fabric")
+* Server name*: localhost
+* Port: 1433
+* Trust server Certifficate: Check this box/Turn it ON
+* Authentication type*: SQL Login
+* User name*: USR_FDE_RO
+* Password*: AgentPassword2026!
+* Save Password: Check this box/Turn it ON
+* Database name: Type master(or Click "Select a database" and Select master)
+* Encrypt: Change this from Mandatory to Optional (or False)
+```
+
+Connect and test below commands:
+```
+-- Test 1: This should work perfectly (Access to clean view)
+Select TOP 5 * FROM FDE_VIEWS.VM_ACTIVE_FLEET;
+-- TEST 2: This should fail instantly (Access to raw legacy table is DENIED)
+SELECT TOP 5 * FROM dbo.TBL_SC_FLEET_HIST_RAW;
+
+## Phase 3 
+```
+run src/agent_tool.py
+run src/orchestrator.py
+
+Step-2: Pass below in the dispatcher >
+- Question-1 (The "Domino Effect" Test)
+```
+Find any acitve shipments near Los Angeles( Latitude ~33.8, Longitude ~-118.1).
+Check the local weather there, and tell me if the current cargo temperature violates the SOP for fresh persihables.
+```
+- Question-2 ("The Restraint" Test (No-Tool Routing))
+```
+I'm a new dispatcher on the night shift. Can you quickly explain the difference between a Tier 1 and Tier 2 esclaation?
+```
+## Phase 4
+Go to VS-code > CTRL + N > 'Click on plain-text' and use 'sql'
+
+Select the su user and write below:
+CREATE TABLE FDE_VIEWS.AgentAuditLog(  
+  LogID INT IDENTITY(1,1) PRIMARY KEY,
+  Timestamp DATETIME DEFAULT GETDATE(),
+  SessionID VARCHAR(50),
+  NodeExecuted VARCHAR(50),
+  ToolName VARCHAR(100),
+  Content NVARCHAR(MAX) -- NVARCHAR to safely handle JSON strings and large LLM outputs
+);
+
+-- Grant the agent user permission to write only to this specific table
+GRANT INSERT ON FDE_VIEWS.AgentAuditLog to USR_FDE_RO;
+```
+## Phase 5
+streamlit run src/ui.py
+
+## Phase 6
+- Deployment
+```
+sudo apt update && sudo apt install -y python3-pip python3-venv git
+cd /home/ubuntu
+git cone https://github.com/nimowhyca/cold-chain-logistics-FDE-Project.git
+cd cold-chain-logistics-AI-Assistant
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run src/ui.py
+```
