@@ -5,7 +5,6 @@ import re
 import sys
 import threading
 import time
-import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -31,6 +30,8 @@ logger = logging.getLogger("api.server")
 # 1. PURE SSE & AUDIT STREAMING ENGINE
 # ==========================================
 SIMULATED_AUDIT_PREFIX = "[SIMULATED: AGENT_OFFLINE_DEMO] "
+PROMPT_AUDIT_NODE = "user_input"
+PROMPT_AUDIT_TOOL = "Dispatcher"
 
 
 def _sse_frame(event_type: str, payload: dict[str, Any]) -> str:
@@ -62,6 +63,17 @@ def generate_dispatch_sse_frames(
     final_emitted = False
     simulated_announced = False
     try:
+        # The operator's prompt is the first audit row of every turn (as in AgentOrchestrator.stream).
+        writer_fn(session_id, PROMPT_AUDIT_NODE, PROMPT_AUDIT_TOOL, prompt)
+        bridge.record_span(
+            session_id,
+            PROMPT_AUDIT_NODE,
+            PROMPT_AUDIT_TOOL,
+            prompt,
+            trace_id=trace_id,
+            span_id=new_span_id(),
+            elapsed_ms=0,
+        )
         for step in streamer_fn(session_id, prompt):
             elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
             step_type = step.get("type")
@@ -148,64 +160,63 @@ def generate_dispatch_sse_frames(
 # ==========================================
 # 2. DEFAULT DATABASE & ORCHESTRATOR ADAPTERS
 # ==========================================
-_ENGINE_CACHE: dict[tuple[str, str, str], Any] = {}
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_EXPORTER: Any = None
+_ADMIN_ENGINES: dict[str, Any] = {}
 
 
-def _build_mssql_engine(user: str, password: str):
-    from sqlalchemy import create_engine
+def _get_audit_exporter():
+    """SQL audit sink built once from AgentSettings: same host/port/database/driver as the
+    telemetry tool, written as the agent's INSERT-only role. Not cached on failure."""
+    global _AUDIT_EXPORTER
+    if _AUDIT_EXPORTER is not None:
+        return _AUDIT_EXPORTER
+    with _AUDIT_LOCK:
+        if _AUDIT_EXPORTER is None:
+            from agent.config import get_agent_settings
+            from observability import SqlAuditLedgerExporter
 
-    db_host = os.getenv("SQL_SERVER_HOST", "localhost")
-    db_port = os.getenv("SQL_SERVER_PORT", "1433")
-    cache_key = (db_host, db_port, user)
-    if cache_key in _ENGINE_CACHE:
-        return _ENGINE_CACHE[cache_key]
+            settings = get_agent_settings()
+            engine = None
+            if settings.audit_enabled:
+                from agent.tools.telemetry_sql import create_telemetry_engine
 
-    conn_str = (
-        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-        f"SERVER={db_host},{db_port};"
-        f"DATABASE=master;"
-        f"UID={user};"
-        f"PWD={password};"
-        f"Encrypt=no;"
-        f"TrustServerCertificate=yes;"
-    )
-    params = urllib.parse.quote_plus(conn_str)
-    engine = create_engine(
-        f"mssql+pyodbc:///?odbc_connect={params}",
-        pool_pre_ping=True,
-        pool_size=2,
-        max_overflow=2,
-    )
-    _ENGINE_CACHE[cache_key] = engine
-    return engine
+                engine = create_telemetry_engine(settings)
+            _AUDIT_EXPORTER = SqlAuditLedgerExporter(
+                engine=engine, enabled=settings.audit_enabled, table_name=settings.audit_table
+            )
+    return _AUDIT_EXPORTER
 
 
 def default_audit_writer(session_id: str, node_name: str, tool_name: str, content: str) -> None:
-    """Silently writes agent execution traces to FDE_VIEWS.AgentAuditLog using agent permissions."""
+    """Writes one row to the audit ledger. Never raises: a failed write is logged, not fatal."""
     try:
-        from sqlalchemy import text
-
-        db_user = os.getenv("SQL_AGENT_USER", "USR_FDE_RO")
-        db_password = os.getenv("SQL_AGENT_PASSWORD", "")
-        engine = _build_mssql_engine(db_user, db_password)
-        with engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO FDE_VIEWS.AgentAuditLog (SessionID, NodeExecuted, ToolName, Content)
-                    VALUES (:session_id, :node_name, :tool_name, :content)
-                    """
-                ),
-                {
-                    "session_id": session_id,
-                    "node_name": node_name,
-                    "tool_name": tool_name,
-                    "content": content,
-                },
-            )
-            conn.commit()
+        _get_audit_exporter().export_span(  # logs its own warning when the INSERT fails
+            session_id=session_id,
+            trace_id="",
+            span_id="",
+            node_executed=node_name,
+            tool_name=tool_name,
+            content=content,
+        )
     except Exception as exc:
-        print(f"Audit Log Failed (Silent): {exc}")
+        logger.warning("Audit ledger unavailable, row not written: %s", _describe_config_error(exc))
+
+
+def _admin_engine(username: str, password: str):
+    """Engine for the audit reader: configured server/database, admin credentials from the request.
+    Only called after the credentials matched SQL_ADMIN_USER / SQL_ADMIN_PASSWORD."""
+    if username not in _ADMIN_ENGINES:
+        from pydantic import SecretStr
+
+        from agent.config import get_agent_settings
+        from agent.tools.telemetry_sql import create_telemetry_engine
+
+        admin_settings = get_agent_settings().model_copy(
+            update={"sql_agent_user": username, "sql_agent_password": SecretStr(password)}
+        )
+        _ADMIN_ENGINES[username] = create_telemetry_engine(admin_settings)
+    return _ADMIN_ENGINES[username]
 
 
 def default_audit_reader(
@@ -224,7 +235,10 @@ def default_audit_reader(
         raise PermissionError("Invalid Administrator Credentials.")
 
     try:
-        engine = _build_mssql_engine(username, password)
+        from agent.config import get_agent_settings
+
+        audit_table = get_agent_settings().audit_table
+        engine = _admin_engine(username, password)
         clauses = []
         params: dict[str, Any] = {"limit": int(limit)}
         if session_id_filter:
@@ -238,7 +252,7 @@ def default_audit_reader(
         query = text(
             f"""
             SELECT TOP (:limit) LogID, Timestamp, SessionID, NodeExecuted, ToolName, Content
-            FROM FDE_VIEWS.AgentAuditLog
+            FROM {audit_table}
             {where_sql}
             ORDER BY Timestamp DESC
             """
@@ -253,8 +267,12 @@ def default_audit_reader(
                     item["Timestamp"] = item["Timestamp"].isoformat()
                 rows.append(item)
             return rows
-    except Exception:
-        # Fallback to the Langfuse/in-memory span buffer when MSSQL is unreachable in local dev
+    except Exception as exc:
+        # MSSQL unreachable (typically local dev): serve the in-memory span buffer instead.
+        logger.warning(
+            "Audit reader: SQL ledger unavailable, serving in-memory spans instead: %s",
+            _describe_config_error(exc),
+        )
         return get_langfuse_bridge().query_spans(
             session_id_filter=session_id_filter,
             node_filter=node_filter,
