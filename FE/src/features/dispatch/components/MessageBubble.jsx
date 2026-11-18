@@ -23,6 +23,16 @@ export function MessageBubble({ entry }) {
             : "bg-[#111622] border-slate-800 text-slate-200"
         }`}
       >
+        {!isUser && entry.simulated && (
+          <div
+            role="alert"
+            data-testid="simulated-banner"
+            className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs font-mono text-amber-300"
+          >
+            ⚠️ OFFLINE DEMO: canned sample data (AGENT_OFFLINE_DEMO). Not live telemetry or SOP retrieval.
+          </div>
+        )}
+
         {!isUser && (
           <ReasoningTimeline
             traces={entry.traces || []}

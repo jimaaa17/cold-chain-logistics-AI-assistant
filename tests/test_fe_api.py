@@ -65,6 +65,218 @@ class TestPureSseAndAuditEngine(unittest.TestCase):
         self.assertEqual(event_types, ["status", "error", "done"])
 
 
+def _parse_frames(frames):
+    events = []
+    for frame in frames:
+        lines = frame.strip().split("\n")
+        events.append(
+            (lines[0].replace("event:", "").strip(), json.loads(lines[1].replace("data:", "").strip()))
+        )
+    return events
+
+
+class _FakeToolCallMsg:
+    def __init__(self, name, args):
+        self.tool_calls = [{"name": name, "args": args}]
+        self.content = ""
+
+
+class _FakeGraph:
+    """Yields one real tool call, then optionally raises mid-run."""
+
+    def __init__(self, fail_mid_run=True, empty=False):
+        self.fail_mid_run = fail_mid_run
+        self.empty = empty
+
+    def stream(self, *_args, **_kwargs):
+        if self.empty:
+            return
+        yield {"reasoner": {"messages": [_FakeToolCallMsg("query_telemetry_db", {"sql_query": "SELECT 1"})]}}
+        if self.fail_mid_run:
+            raise RuntimeError("upstream LLM 503")
+
+
+class TestLivePathNeverFabricates(unittest.TestCase):
+    """Regression: the canned demo stream must never be spliced into, or substituted for, a live run."""
+
+    def setUp(self):
+        from unittest import mock
+
+        try:
+            import langchain_core  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("langchain_core not installed")
+        import api.server as server
+
+        self.server = server
+        self.mock = mock
+        self.audit = []
+        self.addCleanup(mock.patch.stopall)
+
+    def _run(self, *, demo, graph=None, build_error=None):
+        env = {"AGENT_OFFLINE_DEMO": "1"} if demo else {}
+        self.mock.patch.dict("os.environ", env, clear=False).start()
+        if not demo:
+            import os
+
+            os.environ.pop("AGENT_OFFLINE_DEMO", None)
+        self.mock.patch("time.sleep").start()
+        if build_error is not None:
+            getter = self.mock.Mock(side_effect=self.server.AgentConfigError(build_error))
+        else:
+            getter = self.mock.Mock(return_value=graph)
+        self.mock.patch.object(self.server, "_get_compiled_graph", getter).start()
+        frames = generate_dispatch_sse_frames(
+            "sess-x", "status?", self.server.default_agent_streamer, lambda *a: self.audit.append(a)
+        )
+        return _parse_frames(list(frames))
+
+    def _assert_no_canned_data(self, events):
+        blob = json.dumps(events) + json.dumps(self.audit)
+        self.assertNotIn("6.8", blob)
+        self.assertNotIn("Cold_Chain_Incident_SOP_v2.md", blob)
+        self.assertNotIn(self.server.SIMULATED_AUDIT_PREFIX, blob)
+        self.assertFalse(any(d.get("simulated") for _, d in events))
+
+    def test_mid_run_failure_surfaces_error_without_demo(self):
+        events = self._run(demo=False, graph=_FakeGraph())
+        self.assertEqual([e for e, _ in events], ["status", "tool_input", "error", "done"])
+        self.assertIn("upstream LLM 503", events[2][1]["message"])
+        self._assert_no_canned_data(events)
+
+    def test_mid_run_failure_is_not_padded_with_demo_even_when_demo_enabled(self):
+        events = self._run(demo=True, graph=_FakeGraph())
+        self.assertEqual([e for e, _ in events], ["status", "tool_input", "error", "done"])
+        self._assert_no_canned_data(events)
+
+    def test_empty_live_run_is_not_replaced_with_demo(self):
+        events = self._run(demo=True, graph=_FakeGraph(empty=True))
+        self.assertEqual([e for e, _ in events], ["status", "error", "done"])
+        self._assert_no_canned_data(events)
+
+    def test_build_failure_without_demo_reports_config_error(self):
+        events = self._run(demo=False, build_error="Agent configuration error: missing key")
+        self.assertEqual([e for e, _ in events], ["status", "error", "done"])
+        self.assertIn("Agent configuration error", events[1][1]["message"])
+        self._assert_no_canned_data(events)
+
+    def test_demo_stream_is_marked_simulated_everywhere(self):
+        events = self._run(demo=True, build_error="Agent configuration error: missing key")
+        self.assertEqual(events[1][0], "status")
+        self.assertEqual(events[1][1]["phase"], "simulated")
+        content_events = [d for e, d in events if e in ("tool_input", "tool_output", "final_answer")]
+        self.assertEqual(len(content_events), 5)
+        self.assertTrue(all(d["simulated"] is True for d in content_events))
+        self.assertTrue(events[-1][1]["simulated"])
+        self.assertEqual(len(self.audit), 5)
+        self.assertTrue(all(row[3].startswith(self.server.SIMULATED_AUDIT_PREFIX) for row in self.audit))
+
+
+class TestCompiledGraphBuild(unittest.TestCase):
+    """Regression: `_get_compiled_graph` build-error handling."""
+
+    def setUp(self):
+        from unittest import mock
+
+        try:
+            import agent.graph  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("agent dependencies not installed")
+        import api.server as server
+
+        self.server = server
+        self.mock = mock
+        self._saved_graph = server._ACTIVE_GRAPH
+        server._ACTIVE_GRAPH = None
+        self.addCleanup(setattr, server, "_ACTIVE_GRAPH", self._saved_graph)
+        self.addCleanup(mock.patch.stopall)
+
+    def _fail_build_with(self, exc):
+        self.mock.patch("agent.graph.build_agent_graph", side_effect=exc).start()
+
+    def test_build_error_message_never_contains_secrets(self):
+        self.mock.patch.dict(
+            "os.environ", {"GEMINI_API_KEY": "AIza-super-secret-123", "SQL_AGENT_PASSWORD": "Pa55word!"}
+        ).start()
+        self._fail_build_with(
+            ValueError("auth failed for key AIza-super-secret-123 via UID=u;PWD=Pa55word!;Encrypt=no")
+        )
+        with self.assertRaises(self.server.AgentConfigError) as ctx:
+            self.server._get_compiled_graph()
+        msg = str(ctx.exception)
+        self.assertIn("ValueError", msg)
+        self.assertNotIn("AIza-super-secret-123", msg)
+        self.assertNotIn("Pa55word!", msg)
+
+    def test_build_error_message_is_length_capped(self):
+        self._fail_build_with(RuntimeError("x" * 5000))
+        with self.assertRaises(self.server.AgentConfigError) as ctx:
+            self.server._get_compiled_graph()
+        self.assertLess(len(str(ctx.exception)), 400)
+
+    def test_build_failure_clears_settings_cache_and_caches_nothing(self):
+        from agent.config import get_agent_settings
+
+        get_agent_settings()
+        self.assertEqual(get_agent_settings.cache_info().currsize, 1)
+        self._fail_build_with(ValueError("GEMINI_API_KEY is required when AGENT_LLM=GEMINI."))
+        with self.assertRaises(self.server.AgentConfigError):
+            self.server._get_compiled_graph()
+        self.assertEqual(get_agent_settings.cache_info().currsize, 0)
+        self.assertIsNone(self.server._ACTIVE_GRAPH)
+
+    def test_retry_after_fix_builds_once_and_is_cached(self):
+        sentinel = object()
+        build = self.mock.patch(
+            "agent.graph.build_agent_graph", side_effect=[ValueError("missing key"), sentinel]
+        ).start()
+        with self.assertRaises(self.server.AgentConfigError):
+            self.server._get_compiled_graph()
+        self.assertIs(self.server._get_compiled_graph(), sentinel)
+        self.assertIs(self.server._get_compiled_graph(), sentinel)
+        self.assertEqual(build.call_count, 2)
+
+    def test_concurrent_first_requests_build_only_once(self):
+        import threading
+        import time as _time
+
+        calls = []
+
+        def slow_build():
+            calls.append(1)
+            _time.sleep(0.05)
+            return object()
+
+        self.mock.patch("agent.graph.build_agent_graph", side_effect=slow_build).start()
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(self.server._get_compiled_graph()))
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len({id(r) for r in results}), 1)
+
+    def test_demo_fallback_is_refused_in_production(self):
+        self.mock.patch.dict("os.environ", {"AGENT_OFFLINE_DEMO": "1", "APP_ENV": "production"}).start()
+        self.mock.patch("time.sleep").start()
+        self._fail_build_with(ValueError("missing key"))
+        audit = []
+        events = _parse_frames(
+            list(
+                generate_dispatch_sse_frames(
+                    "sess-p", "status?", self.server.default_agent_streamer, lambda *a: audit.append(a)
+                )
+            )
+        )
+        self.assertEqual([e for e, _ in events], ["status", "error", "done"])
+        self.assertIn("Agent configuration error", events[1][1]["message"])
+        self.assertEqual(audit, [])
+
+
 @unittest.skipIf(TestClient is None, "fastapi not installed")
 class TestFeBffApi(unittest.TestCase):
     def setUp(self):
