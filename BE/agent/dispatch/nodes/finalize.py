@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
+from langgraph.runtime import Runtime
 
-from agent.dispatch.events import emit
+from agent.dispatch.context import DispatchContext
 from agent.dispatch.state import DispatchState
 from agent.rules import ACTION_LABELS
 from agent.verifier import ACTION_TAG
@@ -49,10 +50,10 @@ def render_final(state: DispatchState) -> str:
     return body + "\n" + "\n".join(footer)
 
 
-def finalize(state: DispatchState) -> dict:
+def finalize(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
     text = render_final(state)
     v = state.get("verification") or {}
-    emit(
+    runtime.stream_writer(
         {
             "type": "final_answer",
             "content": text,

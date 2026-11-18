@@ -80,6 +80,8 @@ class _FakeGraph:
     """Streams like the dispatch workflow (stream_mode list -> (mode, chunk)): one real tool call,
     then optionally raises mid-run."""
 
+    dispatch_context = None  # iter_dispatch_events passes it to stream(); this fake ignores it
+
     def __init__(self, fail_mid_run=True, empty=False):
         self.fail_mid_run = fail_mid_run
         self.empty = empty

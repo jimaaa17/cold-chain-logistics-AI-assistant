@@ -2,13 +2,12 @@
 
 The shapes below are the contract with `api/server.py` (SSE framing and audit) and
 `FE/src/features/dispatch/hooks/dispatchEvents.js`; change all three together.
+Nodes send them with `runtime.stream_writer(event)` (a no-op outside a streaming run).
 `token` and `approval_required` are produced by `streaming.iter_dispatch_events`, not by nodes.
 """
 from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
-
-from langgraph.config import get_stream_writer
 
 
 class StatusEvent(TypedDict):
@@ -62,10 +61,3 @@ class FinalAnswerEvent(TypedDict):
     verified: bool
     approval: dict | None
 
-
-def emit(event: dict) -> None:
-    """Sends an event to the run's custom stream; a no-op outside a streaming run."""
-    try:
-        get_stream_writer()(event)
-    except Exception:  # outside a streaming run (e.g. graph.invoke) there is no writer
-        pass

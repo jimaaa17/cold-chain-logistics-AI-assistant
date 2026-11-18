@@ -28,12 +28,21 @@ def iter_dispatch_events(
 ) -> Iterator[dict]:
     """Runs (or resumes) one turn and yields normalised events:
     status, tool_input, tool_output, evidence, draft_start, token, verification,
-    approval_required, final_answer."""
+    approval_required, final_answer.
+
+    This is the single place the dispatch graph is run: it passes `graph.dispatch_context`, which
+    every node reads as `runtime.context`."""
     config: dict[str, Any] = {"configurable": {"thread_id": session_id}}
     if callbacks:
         config["callbacks"] = callbacks
     payload: Any = Command(resume=resume) if resume is not None else {"messages": [HumanMessage(content=prompt or "")]}
-    for mode, chunk in graph.stream(payload, config=config, stream_mode=["custom", "messages", "updates"]):
+    stream = graph.stream(
+        payload,
+        config=config,
+        context=graph.dispatch_context,
+        stream_mode=["custom", "messages", "updates"],
+    )
+    for mode, chunk in stream:
         if mode == "custom" and isinstance(chunk, dict):
             yield chunk
         elif mode == "messages":
