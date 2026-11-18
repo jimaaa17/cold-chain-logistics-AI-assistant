@@ -389,6 +389,89 @@ class TestBffAuditPath(unittest.TestCase):
         self.assertEqual(self.engine_settings, [])
 
 
+class TestMetaAndDemoDrift(unittest.TestCase):
+    """F5: /meta comes from the real settings, both servers agree, demo SQL targets the view."""
+
+    def setUp(self):
+        from unittest import mock
+
+        try:
+            import agent.config  # noqa: F401
+            import rag.config  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("settings dependencies not installed")
+        import api.server as server
+        from agent.config import get_agent_settings
+        from rag.config import get_settings
+
+        self.server, self.mock = server, mock
+        for cache in (get_agent_settings, get_settings):
+            cache.cache_clear()
+            self.addCleanup(cache.cache_clear)
+        self.addCleanup(mock.patch.stopall)
+
+    def test_meta_reports_the_llm_the_agent_actually_uses(self):
+        # AGENT_LLM is the canonical name; the old /meta ignored it and never reported OPENAI.
+        self.mock.patch.dict(
+            "os.environ", {"AGENT_LLM": "openai", "OPENAI_API_KEY": "sk-test", "PINECONE_API_KEY": "pc-test"}
+        ).start()
+        meta = self.server.build_meta_payload()
+        self.assertEqual(meta["agent_llm"], "OPENAI")
+        self.assertEqual(meta["agent_model"], "gpt-4o")
+        self.assertNotIn("config_errors", meta)
+
+    def test_meta_reports_embeddings_provider_from_rag_settings(self):
+        self.mock.patch.dict(
+            "os.environ", {"EMBEDDINGS_PROVIDER": "OPENAI", "OPENAI_API_KEY": "sk-test", "PINECONE_API_KEY": "pc-test"}
+        ).start()
+        self.assertEqual(self.server.build_meta_payload()["embeddings_model"], "OPENAI")
+
+    def test_meta_surfaces_config_errors_without_secrets(self):
+        self.mock.patch.dict("os.environ", {"PINECONE_API_KEY": "pc-super-secret-999"}).start()
+        self.mock.patch(
+            "rag.config.get_settings", side_effect=ValueError("index auth failed for pc-super-secret-999")
+        ).start()
+        meta = self.server.build_meta_payload()
+        self.assertEqual(meta["status"], "ok")  # the service is up; config problems are reported separately
+        self.assertIsNone(meta["embeddings_model"])
+        self.assertEqual(len(meta["config_errors"]), 1)
+        self.assertTrue(meta["config_errors"][0].startswith("rag: "))
+        self.assertNotIn("pc-super-secret-999", meta["config_errors"][0])
+
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_stdlib_and_fastapi_meta_are_identical(self):
+        import threading
+        import urllib.request
+
+        from api.server import create_app, make_stdlib_server
+
+        fastapi_meta = TestClient(create_app(agent_streamer=lambda s, p: iter([]))).get("/api/v1/meta").json()
+        server = make_stdlib_server("127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/v1/meta"
+            with urllib.request.urlopen(url, timeout=5) as res:
+                stdlib_meta = json.loads(res.read())
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(stdlib_meta, fastapi_meta)
+        self.assertIn("capabilities", stdlib_meta)  # the stdlib copy used to omit it
+
+    def test_demo_sql_targets_view_aliases_and_passes_the_guard(self):
+        from agent.tools.telemetry_sql import validate_readonly_select
+
+        self.mock.patch("time.sleep").start()
+        events = list(self.server._offline_fallback_streamer("s", "p"))
+        sql = events[0]["args"]["sql_query"]
+        validate_readonly_select(sql)  # raises if the guard would reject it
+        for legacy in ("TS_UTC", "V_LAT", "V_LON", "IOT_TEMP_VAL_C", "CGO_COND_CD", "PRT_CNG_LVL", "DELAY_PROB_DEC"):
+            self.assertNotIn(legacy, sql)
+            self.assertNotIn(legacy, events[1]["content"])
+        self.assertIn("Current_Temperature_C", sql)
+
+
 @unittest.skipIf(TestClient is None, "fastapi not installed")
 class TestFeBffApi(unittest.TestCase):
     def setUp(self):

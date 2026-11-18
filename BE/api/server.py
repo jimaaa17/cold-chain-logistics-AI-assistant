@@ -400,10 +400,10 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
         "name": "query_telemetry_db",
         "args": {
             "sql_query": (
-                "SELECT TOP 5 TS_UTC, V_LAT, V_LON, IOT_TEMP_VAL_C, CGO_COND_CD, "
-                "RISK_CLS_TXT, DELAY_PROB_DEC, PRT_CNG_LVL "
-                "FROM FDE_VIEWS.VW_ACTIVE_FLEET WHERE IOT_TEMP_VAL_C > 4.0 OR PRT_CNG_LVL > 7.0 "
-                "ORDER BY IOT_TEMP_VAL_C DESC"
+                "SELECT TOP 5 Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, "
+                "Risk_Classification, Delay_Probability, Port_Congestion_Level "
+                "FROM FDE_VIEWS.VW_ACTIVE_FLEET WHERE Current_Temperature_C > 4.0 OR Port_Congestion_Level > 7.0 "
+                "ORDER BY Current_Temperature_C DESC"
             )
         },
     }
@@ -414,7 +414,8 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
         "node": "tools",
         "name": "query_telemetry_db",
         "content": (
-            "COLUMNS: TS_UTC, V_LAT, V_LON, IOT_TEMP_VAL_C, CGO_COND_CD, RISK_CLS_TXT, DELAY_PROB_DEC, PRT_CNG_LVL\n"
+            "COLUMNS: Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, "
+            "Risk_Classification, Delay_Probability, Port_Congestion_Level\n"
             "('2026-11-14T23:35:00Z', 33.74, -118.27, 6.8, 'BREACH', 'High Risk', 0.81, 8.4)\n"
             "('2026-11-14T23:32:00Z', 33.77, -118.19, 4.9, 'ALERT', 'High Risk', 0.72, 7.6)"
         ),
@@ -448,8 +449,9 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
         "name": "LLM Text Synthesis",
         "content": (
             "🚨 **Operational Resolution Report (Cited: Cold_Chain_Incident_SOP_v2.md §3.2)**\n\n"
-            "1. **Critical Thermal Breach Detected**: Unit at GPS `(33.74, -118.27)` reports `IOT_TEMP_VAL_C = 6.8°C` "
-            "(exceeding the `4.0°C` threshold) with `PRT_CNG_LVL = 8.4` (`> 7.0`) and `DELAY_PROB_DEC = 0.81` (`> 0.65`).\n"
+            "1. **Critical Thermal Breach Detected**: Unit at GPS `(33.74, -118.27)` reports `Current_Temperature_C = 6.8°C` "
+            "(SOP threshold `IOT_TEMP_VAL_C > 4.0`) with `Port_Congestion_Level = 8.4` (`PRT_CNG_LVL > 7.0`) "
+            "and `Delay_Probability = 0.81` (`DELAY_PROB_DEC > 0.65`).\n"
             "2. **Mandatory SOP Mitigation**: Engage secondary compressor override immediately and reroute to the "
             "San Pedro Cold-Storage Staging Hub within 45 minutes.\n"
             "3. **Audit Status**: Execution spans logged to `FDE_VIEWS.AgentAuditLog` (`USR_FDE_RO`) and `Langfuse`."
@@ -518,6 +520,49 @@ def default_agent_streamer(session_id: str, prompt: str) -> Iterable[dict[str, A
                         }
 
 
+META_CAPABILITIES = {
+    "telemetry_db": ["past_history", "present_snapshot", "future_risk_predictions"],
+    "weather_corridor": ["past_days", "current_weather", "forecast_days"],
+    "sop_rag": ["post_incident_audit", "active_thresholds", "preventive_escalation"],
+}
+
+
+def build_meta_payload() -> dict[str, Any]:
+    """`/api/v1/meta` for both servers. Reads the same settings objects the agent and RAG use, so
+    the reported LLM and embeddings provider can't drift from what actually runs."""
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "service": "fde-dispatch-bff",
+        "agent_llm": None,
+        "agent_model": None,
+        "embeddings_model": None,
+        "observability": get_langfuse_bridge().status(),
+        "capabilities": META_CAPABILITIES,
+    }
+    config_errors: list[str] = []
+    try:
+        from agent.config import get_agent_settings
+
+        agent_cfg = get_agent_settings()
+        payload["agent_llm"] = agent_cfg.agent_llm
+        payload["agent_model"] = {
+            "GEMINI": agent_cfg.gemini_model,
+            "OPENAI": agent_cfg.openai_model,
+            "OLLAMA": agent_cfg.ollama_model,
+        }.get(agent_cfg.agent_llm)
+    except Exception as exc:
+        config_errors.append(f"agent: {_describe_config_error(exc)}")
+    try:
+        from rag.config import get_settings as get_rag_settings
+
+        payload["embeddings_model"] = get_rag_settings().embeddings_provider
+    except Exception as exc:
+        config_errors.append(f"rag: {_describe_config_error(exc)}")
+    if config_errors:
+        payload["config_errors"] = config_errors
+    return payload
+
+
 # ==========================================
 # 3. FASTAPI APPLICATION FACTORY
 # ==========================================
@@ -576,21 +621,7 @@ def create_app(
 
     @app.get("/api/v1/meta")
     def get_meta():
-        default_llm = "GEMINI" if (os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_APKEY")) else "OLLAMA"
-        llm_setting = (os.getenv("Agent_llm") or os.getenv("llm") or default_llm).strip().upper()
-        embeddings_setting = os.getenv("Embeddings_model", "LOCAL").strip().upper()
-        return {
-            "status": "ok",
-            "service": "fde-dispatch-bff",
-            "agent_llm": llm_setting,
-            "embeddings_model": embeddings_setting,
-            "observability": get_langfuse_bridge().status(),
-            "capabilities": {
-                "telemetry_db": ["past_history", "present_snapshot", "future_risk_predictions"],
-                "weather_corridor": ["past_days", "current_weather", "forecast_days"],
-                "sop_rag": ["post_incident_audit", "active_thresholds", "preventive_escalation"],
-            },
-        }
+        return build_meta_payload()
 
     @app.get("/api/v1/traces")
     def get_live_traces(
@@ -662,8 +693,8 @@ except ImportError:  # pragma: no cover
     app = None
 
 
-def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
-    """Zero-dependency HTTP/SSE server for running FE/ + BFF endpoints in any Python environment."""
+def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
+    """Builds (does not start) the zero-dependency HTTP/SSE server. Port 0 picks a free port."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
 
@@ -696,19 +727,7 @@ def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
             if parsed.path == "/healthz":
                 return self._send_json(200, {"status": "ok", "service": "fde-dispatch-bff"})
             if parsed.path == "/api/v1/meta":
-                default_llm = "GEMINI" if (os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_APKEY")) else "OLLAMA"
-                llm_setting = (os.getenv("Agent_llm") or os.getenv("llm") or default_llm).strip().upper()
-                embeddings_setting = os.getenv("Embeddings_model", "LOCAL").strip().upper()
-                return self._send_json(
-                    200,
-                    {
-                        "status": "ok",
-                        "service": "fde-dispatch-bff",
-                        "agent_llm": llm_setting,
-                        "embeddings_model": embeddings_setting,
-                        "observability": get_langfuse_bridge().status(),
-                    },
-                )
+                return self._send_json(200, build_meta_payload())
             if parsed.path == "/api/v1/traces":
                 qs = parse_qs(parsed.query)
                 session_id = qs.get("session_id", [None])[0]
@@ -788,7 +807,12 @@ def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
 
             self._send_json(404, {"detail": "Not Found"})
 
-    server = ThreadingHTTPServer((host, port), BffHandler)
+    return ThreadingHTTPServer((host, port), BffHandler)
+
+
+def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Zero-dependency HTTP/SSE server for running FE/ + BFF endpoints in any Python environment."""
+    server = make_stdlib_server(host, port)
     print(f"🚀 FDE Control Tower (FE + BFF) listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 
