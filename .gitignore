@@ -45,3 +45,9 @@ Thumbs.db
 *.log
 logs/
 
+
+# Node dependencies (FE/ and skill tooling)
+node_modules/
+
+# Local RAG ingestion state (per machine/index; committing it would make other hosts skip their sync)
+data/cache/
