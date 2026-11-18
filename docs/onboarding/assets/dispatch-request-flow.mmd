@@ -1,0 +1,24 @@
+sequenceDiagram
+    participant FE as Browser (FE :5173)
+    participant BFF as BFF (BE/api :8000)
+    participant Agent as LangGraph Agent
+    participant Tools as MSSQL / Open-Meteo / Pinecone
+    participant Sinks as AgentAuditLog / Langfuse
+
+    FE->>BFF: POST /api/v1/dispatch/stream {session_id, prompt}
+    BFF-->>FE: event: status (1st frame, trace_id)
+    BFF->>Agent: default_agent_streamer -> graph.stream(thread_id)
+    loop ReAct Loop (reasoner <-> ToolNode)
+        Agent->>BFF: reasoner (LLM) tool_calls
+        BFF->>Sinks: INSERT AgentAuditLog + span
+        BFF-->>FE: event: tool_input
+        Agent->>Tools: query_telemetry_db | fetch_corridor_conditions | search_compliance_sop
+        Tools-->>Agent: Rows / Weather / SOP chunks
+        Agent->>BFF: ToolMessage
+        BFF->>Sinks: INSERT AgentAuditLog + span
+        BFF-->>FE: event: tool_output
+    end
+    Agent->>BFF: reasoner (LLM) final text (no tool_calls)
+    BFF->>Sinks: INSERT AgentAuditLog + span
+    BFF-->>FE: event: final_answer (or event: error)
+    BFF-->>FE: event: done (always, in finally)
