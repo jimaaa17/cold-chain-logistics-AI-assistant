@@ -24,6 +24,8 @@ def reasoner(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
     )
     previous = state.get("verification") or {}
     msgs = ctx.reasoner_prompt.format_messages(
+        freshness_hours=f"{ctx.settings.evidence_freshness_hours:g}",
+        max_rows=ctx.settings.sql_max_rows,
         history=history(state),
         question=state["question"],
         ledger=ledger_text,

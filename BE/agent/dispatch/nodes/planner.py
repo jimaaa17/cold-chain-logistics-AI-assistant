@@ -5,8 +5,10 @@ from langgraph.runtime import Runtime
 from langgraph.types import Send
 
 from agent.dispatch.context import DispatchContext
+from agent.dispatch.prompts import intent_variables
 from agent.dispatch.state import DispatchState
 from agent.dispatch.text import history
+from agent.intent import Intent
 
 # planner tool name -> (gather node, payload builder)
 _TOOL_TO_NODE = {
@@ -18,7 +20,12 @@ _TOOL_TO_NODE = {
 
 def planner(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
     ctx = runtime.context
-    msgs = ctx.planner_prompt.format_messages(history=history(state), question=state["question"])
+    msgs = ctx.planner_prompt.format_messages(
+        history=history(state),
+        question=state["question"],
+        max_rows=ctx.settings.sql_max_rows,
+        **intent_variables(Intent(**state["intent"]), half_width_deg=ctx.settings.area_half_width_deg),
+    )
     ai = ctx.resources.planner_llm().invoke(msgs)
     calls = [{"name": tc["name"], "args": dict(tc.get("args") or {})} for tc in (getattr(ai, "tool_calls", None) or [])]
     return {"planned_calls": calls}

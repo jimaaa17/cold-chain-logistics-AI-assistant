@@ -113,13 +113,20 @@ def classify_intent(question: str) -> Intent:
     return Intent("open", "in scope, non-standard question", **common)
 
 
+def area_sql(intent: Intent, *, half_width_deg: float) -> list[str]:
+    """WHERE conditions for a square of +/- half_width_deg around the intent's point (empty if none)."""
+    if not intent.has_area:
+        return []
+    lat, lon, w = intent.latitude, intent.longitude, half_width_deg
+    return [
+        f"Latitude BETWEEN {lat - w:.4f} AND {lat + w:.4f}",
+        f"Longitude BETWEEN {lon - w:.4f} AND {lon + w:.4f}",
+    ]
+
+
 def build_scan_sql(intent: Intent, *, half_width_deg: float, max_rows: int) -> str:
     """Fixed, validated-shape query for an incident scan (latest readings first)."""
-    where = []
-    if intent.has_area:
-        lat, lon, w = intent.latitude, intent.longitude, half_width_deg
-        where.append(f"Latitude BETWEEN {lat - w:.4f} AND {lat + w:.4f}")
-        where.append(f"Longitude BETWEEN {lon - w:.4f} AND {lon + w:.4f}")
+    where = area_sql(intent, half_width_deg=half_width_deg)
     if intent.min_temp_c is not None:
         where.append(f"Current_Temperature_C > {intent.min_temp_c:g}")
     if intent.max_temp_c is not None:
