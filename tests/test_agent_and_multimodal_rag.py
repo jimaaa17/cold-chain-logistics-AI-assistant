@@ -263,7 +263,10 @@ class TestRefactoredAgentBackend(RagTestCase):
         )
         res = tool.invoke({"latitude": 33.8, "longitude": -118.1})
         self.assertIn("External Temp: 28.5°C | Wind Speed: 14.2 km/h", res)
-        self.assertIn("High Transit Disruption (Congestion Index: 8.5/10)", res)
+        # F7: weather reports measured values only; no invented congestion index or risk label.
+        self.assertNotIn("Congestion Index", res)
+        self.assertNotIn("Transit Disruption", res)
+        self.assertIn("Port_Congestion_Level", res)  # points the agent at the real field
 
         # Out-of-bounds coordinates
         bad_coords = tool.invoke({"latitude": 120.0, "longitude": -118.1})
@@ -293,8 +296,9 @@ class TestRefactoredAgentBackend(RagTestCase):
         temporal_res = temporal_tool.invoke(
             {"latitude": 33.8, "longitude": -118.1, "past_days": 2, "forecast_days": 3}
         )
-        self.assertIn("Temporal Window (past_days=2, forecast_days=3):", temporal_res)
-        self.assertIn("2026-11-15: Temp 18.4°C..31.2°C | Max Wind 16.4 km/h (High Transit Disruption)", temporal_res)
+        self.assertIn("Daily window (past_days=2, forecast_days=3):", temporal_res)
+        self.assertIn("2026-11-15: Temp 18.4°C..31.2°C | Max Wind 16.4 km/h", temporal_res)
+        self.assertNotIn("Disruption", temporal_res)
 
         # Outage graceful degradation
         failing_tool = make_corridor_conditions_tool(

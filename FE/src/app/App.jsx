@@ -25,6 +25,7 @@ export default function App() {
     messages,
     isStreaming,
     sendPrompt,
+    decideApproval,
     stopStream,
     clearMessages,
   } = useDispatchStream(sessionId);
@@ -74,6 +75,7 @@ export default function App() {
             messages={messages}
             isStreaming={isStreaming}
             onSendPrompt={sendPrompt}
+            onDecideApproval={decideApproval}
             onStopStream={stopStream}
           />
         ) : (

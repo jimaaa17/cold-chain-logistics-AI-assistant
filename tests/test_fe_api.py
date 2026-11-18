@@ -76,14 +76,9 @@ def _parse_frames(frames):
     return events
 
 
-class _FakeToolCallMsg:
-    def __init__(self, name, args):
-        self.tool_calls = [{"name": name, "args": args}]
-        self.content = ""
-
-
 class _FakeGraph:
-    """Yields one real tool call, then optionally raises mid-run."""
+    """Streams like the dispatch workflow (stream_mode list -> (mode, chunk)): one real tool call,
+    then optionally raises mid-run."""
 
     def __init__(self, fail_mid_run=True, empty=False):
         self.fail_mid_run = fail_mid_run
@@ -92,7 +87,7 @@ class _FakeGraph:
     def stream(self, *_args, **_kwargs):
         if self.empty:
             return
-        yield {"reasoner": {"messages": [_FakeToolCallMsg("query_telemetry_db", {"sql_query": "SELECT 1"})]}}
+        yield ("custom", {"type": "tool_input", "name": "query_telemetry_db", "args": {"sql_query": "SELECT 1"}})
         if self.fail_mid_run:
             raise RuntimeError("upstream LLM 503")
 
@@ -195,7 +190,7 @@ class TestCompiledGraphBuild(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def _fail_build_with(self, exc):
-        self.mock.patch("agent.graph.build_agent_graph", side_effect=exc).start()
+        self.mock.patch("agent.workflow.build_dispatch_workflow", side_effect=exc).start()
 
     def test_build_error_message_never_contains_secrets(self):
         self.mock.patch.dict(
@@ -231,7 +226,7 @@ class TestCompiledGraphBuild(unittest.TestCase):
     def test_retry_after_fix_builds_once_and_is_cached(self):
         sentinel = object()
         build = self.mock.patch(
-            "agent.graph.build_agent_graph", side_effect=[ValueError("missing key"), sentinel]
+            "agent.workflow.build_dispatch_workflow", side_effect=[ValueError("missing key"), sentinel]
         ).start()
         with self.assertRaises(self.server.AgentConfigError):
             self.server._get_compiled_graph()
@@ -250,7 +245,7 @@ class TestCompiledGraphBuild(unittest.TestCase):
             _time.sleep(0.05)
             return object()
 
-        self.mock.patch("agent.graph.build_agent_graph", side_effect=slow_build).start()
+        self.mock.patch("agent.workflow.build_dispatch_workflow", side_effect=slow_build).start()
         results = []
         threads = [
             threading.Thread(target=lambda: results.append(self.server._get_compiled_graph()))

@@ -1,8 +1,10 @@
 import { useState, useRef, useCallback } from "react";
-import { streamDispatchPrompt } from "../../../shared/api/endpoints.js";
+import { streamDispatchPrompt, streamApprovalDecision } from "../../../shared/api/endpoints.js";
+import { applyDispatchEvent } from "./dispatchEvents.js";
 
 /**
- * Custom hook managing multi-turn conversation history and real-time LangGraph SSE execution traces.
+ * Manages conversation history and the dispatch workflow's SSE streams: the question stream and,
+ * when a high-stakes action is proposed, the dispatcher's approval stream on the same message.
  */
 export function useDispatchStream(sessionId) {
   const [messages, setMessages] = useState([]);
@@ -10,166 +12,92 @@ export function useDispatchStream(sessionId) {
   const [activeStatus, setActiveStatus] = useState(null);
   const abortControllerRef = useRef(null);
 
+  const runStream = useCallback(async (messageId, start) => {
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    setIsStreaming(true);
+    try {
+      await start({
+        signal: controller.signal,
+        onEvent: (event) => {
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== messageId) return m;
+              const next = applyDispatchEvent(m, event);
+              setActiveStatus(event.type === "done" ? null : next.statusLabel);
+              return next;
+            })
+          );
+        },
+      });
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  state: "error",
+                  statusLabel: "Connection Interrupted",
+                  content:
+                    m.content ||
+                    `Stream error: ${err.message}. Check that the API is running on port 8000.`,
+                }
+              : m
+          )
+        );
+      }
+    } finally {
+      setIsStreaming(false);
+      setActiveStatus(null);
+      abortControllerRef.current = null;
+    }
+  }, []);
+
   const sendPrompt = useCallback(
     async (promptText) => {
       const trimmed = (promptText || "").trim();
       if (!trimmed || isStreaming) return;
 
       const assistantMsgId = `msg-${Date.now()}`;
-      const userEntry = {
-        id: `user-${Date.now()}`,
-        role: "user",
-        content: trimmed,
-        timestamp: new Date().toISOString(),
-      };
-
-      const placeholderAssistant = {
-        id: assistantMsgId,
-        role: "assistant",
-        content: "",
-        traces: [],
-        statusLabel: "🧠 Initializing Core Reasoner Node...",
-        state: "running",
-        elapsedMs: 0,
-        timestamp: new Date().toISOString(),
-      };
-
-      setMessages((prev) => [...prev, userEntry, placeholderAssistant]);
-      setIsStreaming(true);
-      setActiveStatus("🧠 Initializing Core Reasoner Node...");
-
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      try {
-        await streamDispatchPrompt({
-          sessionId,
-          prompt: trimmed,
-          signal: controller.signal,
-          onEvent: ({ type, data }) => {
-            setMessages((prev) =>
-              prev.map((current) => {
-                if (current.id !== assistantMsgId) return current;
-                // Sticky: once any frame is simulated (AGENT_OFFLINE_DEMO), the whole reply is.
-                const m = data?.simulated ? { ...current, simulated: true } : current;
-
-                if (type === "status") {
-                  setActiveStatus(data.label);
-                  return {
-                    ...m,
-                    statusLabel: data.label,
-                    traceId: data.trace_id || m.traceId,
-                  };
-                }
-
-                if (type === "tool_input") {
-                  const nextLabel = `🧠 Agent generated tool parameters (${data.name})...`;
-                  setActiveStatus(nextLabel);
-                  return {
-                    ...m,
-                    statusLabel: nextLabel,
-                    traceId: data.trace_id || m.traceId,
-                    elapsedMs: data.elapsed_ms ?? m.elapsedMs,
-                    traces: [
-                      ...m.traces,
-                      {
-                        type: "tool_input",
-                        simulated: Boolean(data.simulated),
-                        node: data.node || "reasoner",
-                        name: data.name,
-                        args: data.args,
-                        elapsedMs: data.elapsed_ms,
-                        traceId: data.trace_id,
-                        spanId: data.span_id,
-                      },
-                    ],
-                  };
-                }
-
-                if (type === "tool_output") {
-                  const nextLabel = `🔧 Executed subsystem tool (${data.name})...`;
-                  setActiveStatus(nextLabel);
-                  return {
-                    ...m,
-                    statusLabel: nextLabel,
-                    traceId: data.trace_id || m.traceId,
-                    elapsedMs: data.elapsed_ms ?? m.elapsedMs,
-                    traces: [
-                      ...m.traces,
-                      {
-                        type: "tool_output",
-                        simulated: Boolean(data.simulated),
-                        node: data.node || "tools",
-                        name: data.name,
-                        content: data.content,
-                        elapsedMs: data.elapsed_ms,
-                        traceId: data.trace_id,
-                        spanId: data.span_id,
-                      },
-                    ],
-                  };
-                }
-
-                if (type === "final_answer") {
-                  const nextLabel = "📝 Generating Operational Resolution Report...";
-                  setActiveStatus(nextLabel);
-                  return {
-                    ...m,
-                    statusLabel: nextLabel,
-                    content: data.content,
-                    traceId: data.trace_id || m.traceId,
-                    elapsedMs: data.elapsed_ms ?? m.elapsedMs,
-                  };
-                }
-
-                if (type === "error") {
-                  return {
-                    ...m,
-                    state: "error",
-                    statusLabel: "Execution Error",
-                    content: m.content || data.message,
-                  };
-                }
-
-                if (type === "done") {
-                  setActiveStatus(null);
-                  return {
-                    ...m,
-                    state: m.state === "error" ? "error" : "complete",
-                    statusLabel: data.label || "Incident Matrix Evaluation Complete",
-                    elapsedMs: data.elapsed_ms ?? m.elapsedMs,
-                  };
-                }
-
-                return m;
-              })
-            );
-          },
-        });
-      } catch (err) {
-        if (err.name !== "AbortError") {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsgId
-                ? {
-                    ...m,
-                    state: "error",
-                    statusLabel: "Connection Interrupted",
-                    content:
-                      m.content ||
-                      `⚠️ Stream Error: ${err.message}. Verify FastAPI BFF is running on port 8000.`,
-                  }
-                : m
-            )
-          );
-        }
-      } finally {
-        setIsStreaming(false);
-        setActiveStatus(null);
-        abortControllerRef.current = null;
-      }
+      setMessages((prev) => [
+        ...prev,
+        { id: `user-${Date.now()}`, role: "user", content: trimmed, timestamp: new Date().toISOString() },
+        {
+          id: assistantMsgId,
+          role: "assistant",
+          content: "",
+          draft: "",
+          traces: [],
+          statusLabel: "Routing the question...",
+          state: "running",
+          elapsedMs: 0,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+      setActiveStatus("Routing the question...");
+      await runStream(assistantMsgId, ({ signal, onEvent }) =>
+        streamDispatchPrompt({ sessionId, prompt: trimmed, onEvent, signal })
+      );
     },
-    [sessionId, isStreaming]
+    [sessionId, isStreaming, runStream]
+  );
+
+  const decideApproval = useCallback(
+    async (messageId, decision, note = "") => {
+      if (isStreaming) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? { ...m, state: "running", content: "", statusLabel: "Sending decision..." }
+            : m
+        )
+      );
+      await runStream(messageId, ({ signal, onEvent }) =>
+        streamApprovalDecision({ sessionId, decision, note, onEvent, signal })
+      );
+    },
+    [sessionId, isStreaming, runStream]
   );
 
   const stopStream = useCallback(() => {
@@ -190,6 +118,7 @@ export function useDispatchStream(sessionId) {
     isStreaming,
     activeStatus,
     sendPrompt,
+    decideApproval,
     stopStream,
     clearMessages,
   };

@@ -79,11 +79,13 @@ def build_reasoner_llm(settings: AgentSettings | None = None) -> BaseChatModel:
         if not cfg.gemini_api_key or not cfg.gemini_api_key.get_secret_value():
             raise ValueError("GEMINI_API_KEY is required when AGENT_LLM=GEMINI.")
         logger.info("Reasoner LLM: provider=GEMINI model=%s", cfg.gemini_model)
+        extra = {} if cfg.gemini_thinking_budget is None else {"thinking_budget": cfg.gemini_thinking_budget}
         return ChatGoogleGenerativeAI(
             model=cfg.gemini_model,
             temperature=cfg.llm_temperature,
             google_api_key=cfg.gemini_api_key.get_secret_value(),
             max_output_tokens=cfg.llm_max_output_tokens,
+            **extra,
         )
 
     logger.info("Reasoner LLM: provider=OLLAMA model=%s", cfg.ollama_model)
