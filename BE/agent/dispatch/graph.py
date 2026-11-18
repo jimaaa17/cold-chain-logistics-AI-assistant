@@ -31,7 +31,7 @@ from agent.dispatch.nodes.intake import clarify, intake, route_after_intake
 from agent.dispatch.nodes.ledger import ledger, rules
 from agent.dispatch.nodes.planner import planner, route_after_planner
 from agent.dispatch.nodes.reasoning import reasoner, route_after_verifier, verifier
-from agent.dispatch.state import DispatchState
+from agent.dispatch.state import DispatchInput, DispatchOutput, DispatchState
 
 GATHERS = ["gather_telemetry", "gather_weather", "gather_sop"]
 
@@ -48,7 +48,12 @@ def build_dispatch_workflow(
     cfg = settings or get_agent_settings()
     res = resources or DispatchResources(cfg, llm=llm, planner_llm=planner_llm)
 
-    builder = StateGraph(DispatchState, context_schema=DispatchContext)
+    builder = StateGraph(
+        DispatchState,
+        context_schema=DispatchContext,
+        input_schema=DispatchInput,
+        output_schema=DispatchOutput,
+    )
     builder.add_node("intake", intake)
     builder.add_node("clarify", clarify)
     builder.add_node("planner", planner)

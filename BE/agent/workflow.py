@@ -5,6 +5,8 @@ Kept so `api/server.py`, `agent/cli.py` and the tests (which patch
 """
 from agent.dispatch import (
     DispatchContext,
+    DispatchInput,
+    DispatchOutput,
     DispatchResources,
     DispatchState,
     build_dispatch_workflow,
@@ -16,6 +18,8 @@ from agent.dispatch import (
 
 __all__ = [
     "DispatchContext",
+    "DispatchInput",
+    "DispatchOutput",
     "DispatchResources",
     "DispatchState",
     "build_dispatch_workflow",

@@ -1,4 +1,8 @@
-"""Graph state for the dispatch workflow."""
+"""Graph state for the dispatch workflow.
+
+`DispatchState` is the internal state every node sees. `DispatchInput` and `DispatchOutput` are the
+graph's public contract: callers send messages in and get the final answer, the verification result
+and the dispatcher's decision out."""
 from __future__ import annotations
 
 from typing import Annotated, TypedDict
@@ -30,3 +34,14 @@ class DispatchState(TypedDict, total=False):
     verification: dict | None
     approval: dict | None
     final: str
+
+
+class DispatchInput(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+class DispatchOutput(TypedDict, total=False):
+    messages: Annotated[list[BaseMessage], add_messages]
+    final: str
+    verification: dict | None
+    approval: dict | None

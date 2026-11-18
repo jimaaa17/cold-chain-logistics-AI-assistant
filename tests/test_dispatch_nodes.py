@@ -166,5 +166,31 @@ class TestContextWiring(unittest.TestCase):
         self.assertIn("evidence ledger", ctx.reasoner_system.lower())
 
 
+class TestPublicSchema(unittest.TestCase):
+    def test_invoke_returns_only_the_public_output_fields(self):
+        from langchain_core.messages import HumanMessage
+
+        from agent.dispatch import build_dispatch_workflow
+
+        settings = AgentSettings(_env_file=None)
+        graph = build_dispatch_workflow(settings, resources=DispatchResources(settings), clock=lambda: NOW)
+        out = graph.invoke(  # clarify route: no tools, no LLM
+            {"messages": [HumanMessage("Tell me a joke")]},
+            config={"configurable": {"thread_id": "schema"}},
+            context=graph.dispatch_context,
+        )
+        self.assertEqual(set(out), {"messages", "final", "verification", "approval"})
+        self.assertIn("refrigerated shipments", out["final"])
+        internal = graph.get_state({"configurable": {"thread_id": "schema"}}).values
+        self.assertIn("ledger", internal)  # the checkpoint still holds the full internal state
+
+    def test_input_schema_accepts_only_messages(self):
+        from agent.dispatch import build_dispatch_workflow
+
+        settings = AgentSettings(_env_file=None)
+        graph = build_dispatch_workflow(settings, resources=DispatchResources(settings))
+        self.assertEqual(set(graph.get_input_jsonschema()["properties"]), {"messages"})
+
+
 if __name__ == "__main__":
     unittest.main()
