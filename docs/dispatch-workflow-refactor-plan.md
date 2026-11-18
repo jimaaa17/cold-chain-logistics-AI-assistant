@@ -1,6 +1,6 @@
 # Plan: split `BE/agent/workflow.py` into a layered `agent/dispatch/` package
 
-Status: Phases 0–3 and 5 done on `refactor/dispatch-package`. Phase 4 (optional tidy-ups) not started. Reference design: Gen AI `BE/app/agents/rag_agent/`
+Status: Phases 0–3 and 5 done on `refactor/dispatch-package`. Phase 4: LLM factory move (`35ef48c`) and prompt templates Step 1 (`b26bc39`) and Step 2 (`b8561ad`) done; gather helper and retry policies not started (see the notes on each). Reference design: Gen AI `BE/app/agents/rag_agent/`
 (topology-only `graph.py`, one module per node, dependencies through `Runtime[ContextSchema]`,
 public input/output schemas).
 
@@ -152,16 +152,275 @@ internal field, and `pending_approval` reads `snapshot.tasks`, not values, so ca
 
 ### Phase 4: tidy-ups borrowed from the reference (each optional, each its own commit)
 
+- **Prompts as LangChain `ChatPromptTemplate`, written like Gen AI's `prompts/intent.py`.**
+  Reference: `Gen AI/BE/app/agents/rag_agent/prompts/intent.py` and its node `nodes/intent.py`.
+
+  **What the reference does, and what we take from it**
+
+  | `intent.py` pattern | Take it? | Cold-chain use |
+  |---|---|---|
+  | One module per step, exporting one `ChatPromptTemplate` (`intent_classification_prompt`) | Yes | `dispatch/prompts/{planner,reasoner}.py` |
+  | `from_messages([("system", ...), MessagesPlaceholder(...), ("human", ...)])` | Yes | Same three parts for planner and reasoner |
+  | System text split into XML sections: `<system_context>`, `<intent_types>`, `<classification_rules>`, `<reasoning_guidelines>`, `<output_format>`, `<examples>`, `<critical_requirements>` | Yes | Rewrite the reasoner and planner text into tagged sections (drafts below) |
+  | Ordered rules: "Apply these checks in order - STOP at first match", `PRIORITY 1/2/3` | Yes, for the planner | Planner decides which tools to call in a fixed priority order |
+  | Runtime facts as variables in the system text (`Current scope: {filter_type} = '{filter_name}'`) | Yes | Freshness window, row limit and `as_of` instead of hard-coded "24 hours" / "10 rows" |
+  | Human turn as labelled fields (`Current query to classify: {query}`, `Filter type: ...`, `Preselected documents provided: ...`) | Yes | Pass the code-computed `Intent` fields (place, coordinates, temperature filter) to the planner |
+  | Few-shot `<examples>` that include the expected output | Yes | One or two per prompt, using made-up evidence ids |
+  | Literal JSON braces escaped as `{{ }}` | Yes, as a rule | Only if a prompt shows JSON; none do today |
+  | `MessagesPlaceholder("messages", n_messages=...)` to cap history | Yes, without config | `n_messages=HISTORY_MESSAGES` (a module constant, 4 as today). `text.history()` still drops the current question |
+  | Pydantic model + `with_structured_output(..., method="json_mode", include_raw=True)` + safe default on error | Not now | The planner already returns typed tool calls through `bind_tools`, and the reasoner must return Markdown with `ACTION[...]` tags for the verifier. Use this pattern only if an LLM step ever has to return a fixed shape |
+  | `_config = Config()` at import time, to read `n_messages` | No | Settings reach prompts as variables at render time, never at import |
+  | `<critical_requirements>` asks for a confidence score that `IntentClassification` has no field for | No | Every instruction must match the output the node actually parses |
+  | Intent decided by an LLM | No | Cold-chain routes in code (`agent/intent.py`, regex + gazetteer), which is faster, free and testable. Keep it |
+
+  **Step 1: port as-is (no prompt wording change)**. *Done in `b26bc39`; messages captured before and after across four scenarios were byte-identical.*
+
+  - Turn `dispatch/prompts.py` into a package: `prompts/__init__.py`, `planner.py`, `reasoner.py`,
+    `clarify.py` (the clarify reply stays a plain `CLARIFY_TEXT` constant, since no LLM is called).
+  - Wrap today's text unchanged in `ChatPromptTemplate`s, render them in the nodes with
+    `format_messages(...)` and call `llm.invoke(msgs)` as now (reasoner token streaming isn't affected).
+  - The reasoner's optional sections become helpers, `gaps_block(gaps)` and `retry_block(problems)`,
+    each returning `""` or a block. That is the same trick Gen AI uses for its conversation summary.
+  - `DispatchContext` holds `reasoner_prompt` / `planner_prompt: ChatPromptTemplate` instead of the
+    `*_system` strings, so tests can inject a template. `ChatPromptTemplate` is a mutable pydantic
+    model, so each field needs `field(default_factory=...)`.
+  - Delete `reasoner_prompt.txt`, `planner_prompt.txt` and `clarify_text.txt`. Keep
+    `system_prompt.txt`: the legacy ReAct agent and `test_sop_rules.py` still read it.
+  - Done when the rendered messages are byte-identical to today's (compare once before deleting the files).
+
+  **Step 2: restructure the wording in the `intent.py` style (deliberate prompt change)**. *Done in `b8561ad`.*
+
+  Review of the drafts below. These were fixed in the implementation; the drafts are kept as written:
+  - The reasoner example used `ACTION[escalate_qa]`, which isn't an action in `rules.py`. A model
+    copying it would produce a blocked action. A temperature breach permits `restart_cooling`, so the
+    example uses that.
+  - `{as_of}` would have rendered as a raw ISO string (`2026-11-18T22:00:00+00:00 UTC`) and repeats the
+    ledger header (`EVIDENCE LEDGER (now ... UTC; fresh = newer than 24 h)`). Dropped; only
+    `freshness_hours` and `max_rows` are variables.
+  - The planner's PRIORITY 1 (`SELECT TOP {max_rows}`, `ORDER BY Timestamp DESC`, always) and its
+    "average per risk class" example would turn aggregate questions into raw rows. The reasoner can't
+    compute averages (rule 1), so aggregates must come from SQL. The live baseline showed Gemini already
+    writing `GROUP BY` + `MAX(Timestamp) AS Timestamp`. The rule now splits aggregates (COUNT/AVG/MIN/MAX,
+    `GROUP BY`, `MAX(Timestamp) AS Timestamp`) from individual readings (`TOP n`, `ORDER BY Timestamp DESC`).
+  - `describe_temp_filter` didn't exist. `intent_variables()` in `prompts/planner.py` renders place,
+    coordinates, an area filter and a temperature filter as SQL conditions. The area bounds come from
+    `intent.area_sql`, shared with `build_scan_sql`, so open questions and incident scans use the same box.
+  - Added to the reasoner: SQL-aggregated columns (`Avg_*`, `Shipment_Count`) are ledger values, and
+    aggregate rows get their own table layout. Before this, the reasoner wrote "no averages can be
+    calculated" next to the averages.
+
+  Live check (5 questions, Gemini, telemetry view): every draft passed verification on the first attempt,
+  both before and after. "How many High Risk shipments are near Long Beach?" went from 10 raw rows plus an
+  unneeded SOP search to one `COUNT(*)` within the scan area. One run per question, so this shows no
+  regression, not a measured improvement.
+
+  Draft `dispatch/prompts/reasoner.py`. The rules keep their numbers and wording, because the
+  verifier (`agent/verifier.py`) enforces rules 1–5 and the `ACTION[...] on [T3]:` line format:
+
+  ```python
+  from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+  HISTORY_MESSAGES = 4
+
+  REASONER_SYSTEM = """<system_context>
+  You are the dispatch analyst for a cold-chain logistics control tower. Operators ask about
+  refrigerated shipments, port congestion and compliance with the Standard Operating Procedure (SOP).
+  Evidence time: {as_of} UTC. A reading is "fresh" if it is at most {freshness_hours} hours old.
+  </system_context>
+
+  <evidence_ledger>
+  The ledger is built by code from the telemetry database, measured weather and the SOP. Thresholds
+  are already evaluated in code: SOP TRIGGERS lists breaches on fresh evidence, HISTORICAL OR UNDATED
+  BREACHES lists the rest. Your job is to judge what matters most, explain it clearly and propose only
+  the actions the triggers allow.
+  </evidence_ledger>
+
+  <rules>
+  Your answer is checked automatically against the ledger and rejected if it breaks rules 1-5.
+  1. Use only values that appear in the ledger. Do not compute averages, sums, percentages or any new numbers. Do not estimate.
+  2. Cite the evidence id in square brackets after every reading or fact, for example [T3] or [W1]. Cite SOP excerpts as [S1].
+  3. Freshness: a record marked "historical" or "undated" is not a current shipment. Never call it active or live. Say plainly that the data is historical and give its timestamp.
+  4. Actions: propose an action only if it is listed under SOP TRIGGERS for that evidence id. Write each one on its own line, exactly as:
+     ACTION[action_id] on [T3]: one sentence explaining why, citing the SOP section.
+     Never propose actions for historical breaches. If there are no triggers, write "No SOP action is required on current data."
+  5. Every SOP trigger must be reported, with its evidence id.
+  6. If a temperature breach is fresh, you may add (without an ACTION line) that the SOP allows diversion to emergency cold storage only if the ETA delay exceeds 1 hour, which the data does not show.
+  7. Weather is context only. The SOP has no weather threshold, so weather never justifies a diversion. Port congestion comes only from Port_Congestion_Level in telemetry.
+  8. Write plain Markdown. No emoji. Keep it short: an operator reads this under time pressure.
+  </rules>
+
+  <output_format>
+  ## Summary
+  Two or three sentences: what the data shows and whether any SOP action applies now.
+
+  ## Readings
+  A Markdown table of the telemetry records (at most {max_rows} rows): Evidence | Time (UTC) | Lat, Lon | Temp °C | Risk | Delay prob | Port congestion | Freshness. Leave a blank line before and after the table. Omit this section if there is no telemetry.
+
+  ## Weather
+  One line from the weather record, if present, with its id.
+
+  ## SOP assessment
+  Breaches on fresh data first (with ACTION lines), then historical breaches as history. End with the SOP citation(s) used.
+  </output_format>
+
+  <examples>
+  <example>
+  SOP TRIGGERS: [T1] temperature 6.8 °C > 4.0 °C, actions: escalate_qa
+  Answer line: ACTION[escalate_qa] on [T1]: cargo is at 6.8 °C [T1], above the 4.0 °C limit in SOP §1 [S1].
+  </example>
+  <example>
+  SOP TRIGGERS: none. HISTORICAL OR UNDATED BREACHES: [T2] 7.1 °C at 2023-07-13 22:00
+  Answer line: No SOP action is required on current data. [T2] is historical (2023-07-13 22:00 UTC), not a live shipment.
+  </example>
+  </examples>
+
+  <critical_requirements>
+  - Every number has an evidence id; no number is computed.
+  - ACTION lines only for SOP TRIGGERS, in the exact format of rule 4.
+  - Historical data is never described as current.
+  </critical_requirements>"""
+
+  REASONER_HUMAN = (
+      "<question>\n{question}\n</question>\n\n"
+      "<evidence_ledger_data>\n{ledger}\n</evidence_ledger_data>"
+      "{gaps_block}{retry_block}"
+  )
+
+  reasoner_prompt = ChatPromptTemplate.from_messages([
+      ("system", REASONER_SYSTEM),
+      MessagesPlaceholder("history", optional=True, n_messages=HISTORY_MESSAGES),
+      ("human", REASONER_HUMAN),
+  ])
+
+  def gaps_block(gaps: list[str]) -> str:
+      if not gaps:
+          return ""
+      return ("\n\n<data_gaps>\nSay these sources were unavailable; do not guess.\n"
+              + "\n".join(f"- {g}" for g in gaps) + "\n</data_gaps>")
+
+  def retry_block(problems: list[str]) -> str:
+      if not problems:
+          return ""
+      return ("\n\n<verifier_feedback>\nYour previous draft was rejected by the automatic check. "
+              "Rewrite it and fix exactly these problems:\n"
+              + "\n".join(f"- {p}" for p in problems) + "\n</verifier_feedback>")
+  ```
+
+  Draft `dispatch/prompts/planner.py`. The planner only runs for `open` questions, and its human
+  turn carries the fields `intake` already extracted, like Gen AI passes `filter_type` and `has_preselected`:
+
+  ```python
+  PLANNER_SYSTEM = """<system_context>
+  You plan data retrieval for a cold-chain control tower. Call the tools needed to answer the
+  question, in parallel where possible. Do not answer the question yourself; another step does that.
+  </system_context>
+
+  <tools>
+  - query_telemetry_db: one read-only T-SQL SELECT against FDE_VIEWS.VW_ACTIVE_FLEET.
+    Columns: Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code,
+    Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index.
+  - fetch_corridor_conditions: measured and forecast weather for a latitude/longitude.
+  - search_compliance_sop: search the SOP knowledge base.
+  </tools>
+
+  <planning_rules>
+  Apply these checks in order. Each one that matches adds a tool call:
+  PRIORITY 1: the question asks about shipments, temperatures, risk, delay or congestion
+    → query_telemetry_db. Use SELECT TOP {max_rows}, always include Timestamp, ORDER BY Timestamp DESC.
+  PRIORITY 2: a place or coordinates are known (see the human turn)
+    → fetch_corridor_conditions for those coordinates.
+  PRIORITY 3: the question asks what to do, or about a threshold, rule or procedure
+    → search_compliance_sop with a short query in the SOP's words.
+  If nothing matches, call search_compliance_sop with the question.
+  </planning_rules>
+
+  <examples>
+  <example>
+  Question: "What is the average temperature per risk class near Long Beach?"
+  Calls: query_telemetry_db(SELECT TOP {max_rows} Timestamp, Risk_Classification, Current_Temperature_C ... ORDER BY Timestamp DESC),
+         fetch_corridor_conditions(latitude=33.77, longitude=-118.19)
+  </example>
+  </examples>
+
+  <critical_requirements>
+  - SELECT only, against FDE_VIEWS.VW_ACTIVE_FLEET only.
+  - Never answer in text; only call tools.
+  </critical_requirements>"""
+
+  PLANNER_HUMAN = (
+      "Question to plan for: {question}\n\n"
+      "Known place: {place}\nCoordinates: {coordinates}\n"
+      "Temperature filter: {temperature_filter}\nRouting reason: {intent_reason}"
+  )
+
+  planner_prompt = ChatPromptTemplate.from_messages([
+      ("system", PLANNER_SYSTEM),
+      MessagesPlaceholder("history", optional=True, n_messages=HISTORY_MESSAGES),
+      ("human", PLANNER_HUMAN),
+  ])
+  ```
+
+  The nodes fill the variables from the context and state. Settings are read at render time, not import time:
+
+  ```python
+  # reasoner node
+  msgs = ctx.reasoner_prompt.format_messages(
+      as_of=state["as_of"], freshness_hours=ctx.settings.evidence_freshness_hours,
+      max_rows=ctx.settings.sql_max_rows, history=history(state),
+      question=state["question"], ledger=ledger_text,
+      gaps_block=gaps_block(state.get("gaps") or []),
+      retry_block=retry_block(previous.get("problems") or []) if attempt > 1 else "",
+  )
+
+  # planner node
+  intent = Intent(**state["intent"])
+  msgs = ctx.planner_prompt.format_messages(
+      max_rows=ctx.settings.sql_max_rows, history=history(state), question=state["question"],
+      place=intent.place or "none",
+      coordinates=f"{intent.latitude}, {intent.longitude}" if intent.has_area else "none",
+      temperature_filter=describe_temp_filter(intent),  # e.g. "> 4 °C", or "none"
+      intent_reason=intent.reason,
+  )
+  ```
+
+  Notes for Step 2:
+  - It changes what the model sees, so it is its own commit, after Step 1. The offline tests use fake
+    LLMs, so they show the wiring works but not the answer quality. Before merging, run 5–10 real questions
+    (incident scan near Long Beach, historical-only data, SOP lookup, an aggregate, a retry case)
+    through `python -m agent` on both versions and compare: verifier pass rate on the first attempt,
+    `ACTION` lines and citations.
+  - The example evidence values (6.8 °C, [T1], [T2]) are illustrative. Check that the verifier doesn't
+    match numbers from the system prompt. It reads only the draft, so a model copying an example
+    number without a ledger id would fail rule 1, which is the behaviour we want.
+  - Literal braces: none in these drafts. If a JSON example is ever added, double them (`{{ }}`) as `intent.py` does.
+
+  **Tests** (`tests/test_dispatch_prompts.py`):
+  - the template input variables equal the set each node passes (catches a stray brace or a missing variable);
+  - the messages the planner and reasoner send, captured with a recording fake LLM, including `history` trimmed to `HISTORY_MESSAGES`;
+  - `<data_gaps>` and `<verifier_feedback>` appear only when there are gaps or a retry;
+  - injecting a different template through `DispatchContext`.
+
+  Also update `tests/test_dispatch_nodes.py`, which asserts on `ctx.reasoner_system`, and the `prompts` lines in `CLAUDE.md`.
+
 - **One gather helper.** The three gather nodes repeat emit `tool_input` → try → map errors into
   `result["error"]` → emit `tool_output`. Extract `_gather(name, args, source, call, on_error)` so each
   node is ~10 lines. Keep the "errors become ledger gaps" behaviour exactly.
-- **Move the LLM factory out of the legacy graph.** `DispatchResources` imports `build_reasoner_llm`
+  *Review: recommend skipping.* Each node catches different exceptions and writes different gap and
+  tool-output text, and `gather_sop` records a gap on an empty result without any exception. The helper
+  would need callbacks for all of that to save about 15 lines per node, and it puts the gap strings that
+  tests and operators rely on at risk.
+- **Move the LLM factory out of the legacy graph.** *(Done in `35ef48c`.)* `DispatchResources` imports `build_reasoner_llm`
   and `build_default_tools` from `agent/graph.py` (the old ReAct agent). Move them to `agent/llm.py`;
   the old graph imports from there. Add a small `LLMTask` table (`PLANNER`, `REASONER`) only once
   the two need different models or temperatures.
 - **Retry policies on the LLM nodes.** `planner` and `reasoner` currently fail the turn on a transient
   provider error. `add_node("reasoner", reasoner, retry_policy=RetryPolicy(max_attempts=2))` is the
   reference's approach. This changes behaviour (latency on failure), so decide explicitly.
+  *Review: don't use the default `retry_on`.* LangGraph 1.2.11's `default_retry_on` retries every
+  exception type it doesn't recognise, which includes provider auth and quota errors, so a permanent
+  failure takes twice as long. The provider clients also retry internally. If adopted, pass a `retry_on`
+  that accepts only 429/5xx/timeouts (reuse `rag.core.resilience`'s transient check). A retried
+  reasoner re-emits `draft_start`, which clears the draft in the FE, so streamed tokens don't double.
 
 ### Phase 5: documentation
 
@@ -173,7 +432,8 @@ internal field, and `pending_approval` reads `snapshot.tasks`, not values, so ca
 
 - Building every client at startup in `main.py` (cold-chain's lazy `DispatchResources` + `warm()` is better).
 - `Any`-typed context fields: `DispatchContext` is fully typed.
-- Prompt modules that read config at import time.
+- Prompt modules that read config at import time (`intent.py`'s `_config = Config()`).
+- An LLM for intent routing: `agent/intent.py` stays deterministic.
 - Routing on string literals when an enum exists: keep using `Intent.kind` values from `intent.py`.
 
 ## Out of scope (separate follow-up)
