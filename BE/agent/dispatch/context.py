@@ -46,7 +46,7 @@ class DispatchResources:
     def llm(self):
         with self._lock:
             if self._llm is None:
-                from agent.graph import build_reasoner_llm
+                from agent.llm import build_reasoner_llm
 
                 self._llm = build_reasoner_llm(self.settings)
             return self._llm
@@ -55,7 +55,7 @@ class DispatchResources:
         llm = self.llm()
         with self._lock:
             if self._planner_llm is None:
-                from agent.graph import build_default_tools
+                from agent.llm import build_default_tools
 
                 self._planner_llm = llm.bind_tools(build_default_tools(self.settings))
             return self._planner_llm
