@@ -14,241 +14,40 @@ No import-time side effects: models, engines and clients are built lazily (or in
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, Callable, Iterable, Iterator, TypedDict
+from typing import Any, Callable
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.types import Command, Send, interrupt
+from langgraph.types import Send, interrupt
 
 from agent.config import AgentSettings, get_agent_settings
+from agent.dispatch.context import DispatchResources
+from agent.dispatch.events import emit
+from agent.dispatch.nodes.finalize import finalize, render_final
+from agent.dispatch.prompts import clarify_text, planner_prompt, reasoner_prompt
+from agent.dispatch.state import DispatchState
+from agent.dispatch.streaming import collect_final, iter_dispatch_events, pending_approval
+from agent.dispatch.text import history, plain, text_of
 from agent.evidence import render_ledger, sop_records, telemetry_records, utc_now, weather_records
 from agent.intent import SCAN_SOP_QUERY, Intent, build_scan_sql, classify_intent
 from agent.rules import ACTION_LABELS, evaluate_rules
-from agent.verifier import ACTION_TAG, MAX_ATTEMPTS, verify_draft
+from agent.verifier import MAX_ATTEMPTS, verify_draft
+
+__all__ = [
+    "DispatchResources",
+    "DispatchState",
+    "build_dispatch_workflow",
+    "collect_final",
+    "iter_dispatch_events",
+    "pending_approval",
+    "render_final",
+]
 
 logger = logging.getLogger(__name__)
-
-PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
-CLARIFY_TEXT = (
-    "I can answer questions about refrigerated shipments, port congestion and SOP compliance. "
-    "For example: \"Which shipments are above 4 °C near Long Beach?\" or "
-    "\"What does the SOP require when port congestion is high?\""
-)
-PLANNER_PROMPT = (
-    "You plan data retrieval for a cold-chain control tower. Call the tools needed to answer the "
-    "question, in parallel where possible. Do not answer the question yourself. query_telemetry_db "
-    "takes one T-SQL SELECT against FDE_VIEWS.VW_ACTIVE_FLEET (columns: Timestamp, Latitude, Longitude, "
-    "Current_Temperature_C, Cargo_Condition_Code, Risk_Classification, Delay_Probability, "
-    "Port_Congestion_Level, Route_Risk_Index); always include Timestamp."
-)
-
-
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
-def _collect(old: list | None, new: list | None) -> list:
-    """Fan-in reducer for parallel gather nodes; `None` resets it at the start of each turn."""
-    if new is None:
-        return []
-    return (old or []) + list(new)
-
-
-class DispatchState(TypedDict, total=False):
-    messages: Annotated[list[BaseMessage], add_messages]
-    question: str
-    intent: dict
-    planned_calls: list[dict]
-    gathered: Annotated[list[dict], _collect]
-    ledger: list[dict]
-    gaps: list[str]
-    triggers: list[dict]
-    historical: list[dict]
-    as_of: str
-    draft: str
-    attempts: int
-    verification: dict | None
-    approval: dict | None
-    final: str
-
-
-# ---------------------------------------------------------------------------
-# Shared resources (built once, pre-warmed at server startup)
-# ---------------------------------------------------------------------------
-class DispatchResources:
-    """Lazily built, thread-safe handles shared by every run of the workflow."""
-
-    def __init__(
-        self,
-        settings: AgentSettings,
-        *,
-        llm: Any | None = None,
-        planner_llm: Any | None = None,
-        engine: Any | None = None,
-        http_client: Any | None = None,
-        retrieval_service: Any | None = None,
-    ) -> None:
-        self.settings = settings
-        self._llm = llm
-        self._planner_llm = planner_llm
-        self._engine = engine
-        self._http = http_client
-        self._retrieval = retrieval_service
-        self._lock = threading.Lock()
-
-    def llm(self):
-        with self._lock:
-            if self._llm is None:
-                from agent.graph import build_reasoner_llm
-
-                self._llm = build_reasoner_llm(self.settings)
-            return self._llm
-
-    def planner_llm(self):
-        llm = self.llm()
-        with self._lock:
-            if self._planner_llm is None:
-                from agent.graph import build_default_tools
-
-                self._planner_llm = llm.bind_tools(build_default_tools(self.settings))
-            return self._planner_llm
-
-    def engine(self):
-        with self._lock:
-            if self._engine is None:
-                from agent.tools.telemetry_sql import create_telemetry_engine
-
-                self._engine = create_telemetry_engine(self.settings)
-            return self._engine
-
-    def http(self):
-        with self._lock:
-            if self._http is None:
-                from agent.tools.corridor_api import build_corridor_client
-
-                self._http = build_corridor_client(self.settings)
-            return self._http
-
-    def retrieval(self):
-        with self._lock:
-            if self._retrieval is None:
-                from rag.config import get_settings
-                from rag.retrieval.service import RetrievalService
-
-                self._retrieval = RetrievalService.from_settings(get_settings())
-            return self._retrieval
-
-    def warm(self) -> dict[str, str]:
-        """Loads everything the first request would otherwise pay for. Never raises."""
-        report: dict[str, str] = {}
-        steps: list[tuple[str, Callable[[], Any]]] = [
-            ("llm_client", self.llm),
-            ("sql_engine", self.engine),
-            ("http_client", self.http),
-            ("sop_retrieval", lambda: self.retrieval().warm_up()),
-        ]
-        for name, step in steps:
-            try:
-                step()
-                report[name] = "ready"
-            except Exception as exc:  # degraded, not fatal: the tool reports the gap at request time
-                report[name] = f"failed: {type(exc).__name__}"
-                logger.warning("Pre-warm step %s failed: %s", name, type(exc).__name__)
-        return report
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _emit(event: dict) -> None:
-    try:
-        get_stream_writer()(event)
-    except Exception:  # outside a streaming run (e.g. graph.invoke) there is no writer
-        pass
-
-
-def _plain(value: Any) -> Any:
-    from decimal import Decimal
-
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
-
-
-def _text(content: Any, *, strip: bool = True) -> str:
-    if isinstance(content, str):
-        return content.strip() if strip else content
-    if isinstance(content, list):
-        parts = [
-            item if isinstance(item, str) else item.get("text", "")
-            for item in content
-            if isinstance(item, str) or (isinstance(item, dict) and item.get("type") == "text")
-        ]
-        joined = "".join(parts)
-        return joined.strip() if strip else joined
-    return str(content or "")
-
-
-def _history(state: DispatchState, limit: int = 4) -> list[BaseMessage]:
-    msgs = [m for m in state.get("messages", []) if isinstance(m, (HumanMessage, AIMessage))]
-    return msgs[:-1][-limit:]  # earlier turns only; the current question is passed with the ledger
-
-
-def _load_prompt(name: str, fallback: str) -> str:
-    try:
-        return (PROMPT_DIR / name).read_text(encoding="utf-8")
-    except OSError:
-        return fallback
-
-
-def render_final(state: DispatchState) -> str:
-    draft = state.get("draft", "")
-    verification = state.get("verification") or {}
-    approval = state.get("approval")
-    permitted = {(a["action"], a["evidence"]): a for a in verification.get("proposed_actions", [])}
-
-    def _action(match) -> str:
-        action, evidence = match.group(1), match.group(2)
-        label = ACTION_LABELS.get(action, action)
-        if (action, evidence) not in permitted:
-            return f"**Blocked action** (no SOP trigger on fresh data): {label} [{evidence}]"
-        if permitted[(action, evidence)]["high_stakes"]:
-            status = "awaiting dispatcher approval"
-            if approval:
-                status = f"{approval['decision']} by {approval['by']}"
-            return f"**Proposed action ({status}):** {label} [{evidence}]"
-        return f"**Proposed action:** {label} [{evidence}]"
-
-    body = ACTION_TAG.sub(_action, draft).strip()
-    if verification.get("skipped"):
-        return body
-    footer = ["", "---"]
-    if verification.get("passed"):
-        footer.append(
-            f"**Verification:** passed. {verification.get('numbers_checked', 0)} numbers and every citation "
-            "were checked against the evidence ledger."
-        )
-    else:
-        footer.append("**Unverified:** the automatic check still failed after one retry. Treat this answer with caution.")
-        footer.extend(f"- {p}" for p in verification.get("problems", []))
-    if approval:
-        line = f"**Dispatcher decision:** {approval['decision']} by {approval['by']} at {approval['at'][:16].replace('T', ' ')} UTC"
-        if approval.get("note"):
-            line += f" ({approval['note']})"
-        footer.append(line)
-        if approval["decision"] == "rejected":
-            footer.append("The proposed high-stakes actions must not be executed.")
-    return body + "\n" + "\n".join(footer)
-
 
 # ---------------------------------------------------------------------------
 # Graph
@@ -265,14 +64,14 @@ def build_dispatch_workflow(
     cfg = settings or get_agent_settings()
     res = resources or DispatchResources(cfg, llm=llm, planner_llm=planner_llm)
     now_fn = clock or utc_now
-    reasoner_system = _load_prompt("reasoner_prompt.txt", "Answer only from the evidence ledger and cite ids.")
+    reasoner_system = reasoner_prompt()
 
     # -- intake & routing --------------------------------------------------
     def intake(state: DispatchState) -> dict:
         human = [m for m in state.get("messages", []) if isinstance(m, HumanMessage)]
-        question = _text(human[-1].content) if human else ""
+        question = text_of(human[-1].content) if human else ""
         intent = classify_intent(question)
-        _emit({"type": "status", "phase": "routing", "label": f"Route: {intent.kind}", "intent": intent.kind})
+        emit({"type": "status", "phase": "routing", "label": f"Route: {intent.kind}", "intent": intent.kind})
         return {
             "question": question,
             "intent": intent.to_state(),
@@ -311,10 +110,10 @@ def build_dispatch_workflow(
         return sends
 
     def clarify(state: DispatchState) -> dict:
-        return {"draft": CLARIFY_TEXT, "verification": {"passed": True, "skipped": True, "problems": [], "proposed_actions": []}}
+        return {"draft": clarify_text(), "verification": {"passed": True, "skipped": True, "problems": [], "proposed_actions": []}}
 
     def planner(state: DispatchState) -> dict:
-        msgs = [SystemMessage(PLANNER_PROMPT), *_history(state), HumanMessage(state["question"])]
+        msgs = [SystemMessage(planner_prompt()), *history(state), HumanMessage(state["question"])]
         ai = res.planner_llm().invoke(msgs)
         calls = [{"name": tc["name"], "args": dict(tc.get("args") or {})} for tc in (getattr(ai, "tool_calls", None) or [])]
         return {"planned_calls": calls}
@@ -336,12 +135,12 @@ def build_dispatch_workflow(
         from agent.tools.telemetry_sql import UnsafeSqlError, fetch_telemetry_rows
 
         sql = payload.get("sql", "")
-        _emit({"type": "tool_input", "name": "query_telemetry_db", "args": {"sql_query": sql}})
+        emit({"type": "tool_input", "name": "query_telemetry_db", "args": {"sql_query": sql}})
         result: dict = {"source": "telemetry", "columns": [], "rows": [], "error": None}
         try:
             columns, rows = fetch_telemetry_rows(res.engine(), sql, max_rows=cfg.sql_max_rows)
             result["columns"] = columns
-            result["rows"] = [[_plain(v) for v in row] for row in rows]
+            result["rows"] = [[plain(v) for v in row] for row in rows]
             text = f"COLUMNS: {', '.join(columns)}\n" + "\n".join(str(tuple(r)) for r in result["rows"]) if rows else "No records matched the query criteria."
         except UnsafeSqlError as exc:
             result["error"] = str(exc)
@@ -350,7 +149,7 @@ def build_dispatch_workflow(
             logger.warning("Telemetry gather failed: %s", type(exc).__name__)
             result["error"] = f"telemetry database unavailable ({type(exc).__name__})"
             text = f"Database Error: {result['error']}"
-        _emit({"type": "tool_output", "name": "query_telemetry_db", "content": text})
+        emit({"type": "tool_output", "name": "query_telemetry_db", "content": text})
         return {"gathered": [result]}
 
     def gather_weather(payload: dict) -> dict:
@@ -362,7 +161,7 @@ def build_dispatch_workflow(
             "past_days": int(payload.get("past_days", 0) or 0),
             "forecast_days": int(payload.get("forecast_days", 0) or 0),
         }
-        _emit({"type": "tool_input", "name": "fetch_corridor_conditions", "args": args})
+        emit({"type": "tool_input", "name": "fetch_corridor_conditions", "args": args})
         result: dict = {"source": "weather", "observations": None, "error": None}
         try:
             obs = fetch_corridor_observations(
@@ -378,7 +177,7 @@ def build_dispatch_workflow(
             logger.warning("Weather gather failed: %s", type(exc).__name__)
             result["error"] = f"weather service unavailable ({type(exc).__name__})"
             text = f"Corridor API Communication Failure: {type(exc).__name__}"
-        _emit({"type": "tool_output", "name": "fetch_corridor_conditions", "content": text})
+        emit({"type": "tool_output", "name": "fetch_corridor_conditions", "content": text})
         return {"gathered": [result]}
 
     def gather_sop(payload: dict) -> dict:
@@ -386,7 +185,7 @@ def build_dispatch_workflow(
         from rag.retrieval.client import NO_MATCH_MESSAGE, QUERY_REJECTED_MESSAGE, UNAVAILABLE_MESSAGE
 
         query = payload.get("query", "")
-        _emit({"type": "tool_input", "name": "search_compliance_sop", "args": {"query": query}})
+        emit({"type": "tool_input", "name": "search_compliance_sop", "args": {"query": query}})
         result: dict = {"source": "sop", "chunks": [], "error": None}
         try:
             chunks = res.retrieval().retrieve(query, top_k=cfg.rag_top_k)
@@ -404,7 +203,7 @@ def build_dispatch_workflow(
             logger.warning("SOP gather failed: %s", type(exc).__name__)
             result["error"] = "SOP knowledge base unavailable"
             text = UNAVAILABLE_MESSAGE
-        _emit({"type": "tool_output", "name": "search_compliance_sop", "content": text})
+        emit({"type": "tool_output", "name": "search_compliance_sop", "content": text})
         return {"gathered": [result]}
 
     # -- ledger, rules -----------------------------------------------------
@@ -432,7 +231,7 @@ def build_dispatch_workflow(
     def rules(state: DispatchState) -> dict:
         triggers, historical = evaluate_rules(state.get("ledger", []))
         ledger_records = state.get("ledger", [])
-        _emit(
+        emit(
             {
                 "type": "evidence",
                 "records": len(ledger_records),
@@ -448,7 +247,7 @@ def build_dispatch_workflow(
     # -- reasoner, verifier ------------------------------------------------
     def reasoner(state: DispatchState) -> dict:
         attempt = int(state.get("attempts", 0)) + 1
-        _emit({"type": "draft_start", "attempt": attempt})
+        emit({"type": "draft_start", "attempt": attempt})
         now = datetime.fromisoformat(state["as_of"]) if state.get("as_of") else now_fn()
         ledger_text = render_ledger(
             state.get("ledger", []), state.get("triggers", []), state.get("historical", []),
@@ -463,9 +262,9 @@ def build_dispatch_workflow(
                 "\n\nYOUR PREVIOUS DRAFT WAS REJECTED BY THE AUTOMATIC CHECK. Rewrite it and fix exactly these problems:\n"
                 + "\n".join(f"- {p}" for p in previous["problems"])
             )
-        msgs = [SystemMessage(reasoner_system), *_history(state), HumanMessage(content)]
+        msgs = [SystemMessage(reasoner_system), *history(state), HumanMessage(content)]
         ai = res.llm().invoke(msgs)
-        return {"draft": _text(ai.content), "attempts": attempt}
+        return {"draft": text_of(ai.content), "attempts": attempt}
 
     def verifier(state: DispatchState) -> dict:
         result = verify_draft(
@@ -478,7 +277,7 @@ def build_dispatch_workflow(
         )
         result["attempt"] = state.get("attempts", 1)
         retrying = not result["passed"] and result["attempt"] < MAX_ATTEMPTS
-        _emit({"type": "verification", **result, "retrying": retrying})
+        emit({"type": "verification", **result, "retrying": retrying})
         return {"verification": result}
 
     def route_after_verifier(state: DispatchState) -> str:
@@ -517,19 +316,6 @@ def build_dispatch_workflow(
             }
         }
 
-    def finalize(state: DispatchState) -> dict:
-        text = render_final(state)
-        v = state.get("verification") or {}
-        _emit(
-            {
-                "type": "final_answer",
-                "content": text,
-                "verified": bool(v.get("passed")) and not v.get("skipped"),
-                "approval": state.get("approval"),
-            }
-        )
-        return {"final": text, "messages": [AIMessage(content=text)]}
-
     builder = StateGraph(DispatchState)
     for name, fn in (
         ("intake", intake), ("clarify", clarify), ("planner", planner),
@@ -555,54 +341,3 @@ def build_dispatch_workflow(
     graph.dispatch_resources = res  # type: ignore[attr-defined]  # for pre-warming
     return graph
 
-
-# ---------------------------------------------------------------------------
-# Streaming adapter (graph output -> normalised events for the BFF)
-# ---------------------------------------------------------------------------
-def pending_approval(graph, session_id: str) -> dict | None:
-    """The approval request the session is paused on, if any."""
-    snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
-    for task in getattr(snapshot, "tasks", ()) or ():
-        for intr in getattr(task, "interrupts", ()) or ():
-            return dict(intr.value)
-    return None
-
-
-def iter_dispatch_events(
-    graph,
-    *,
-    session_id: str,
-    prompt: str | None = None,
-    resume: dict | None = None,
-    callbacks: list | None = None,
-) -> Iterator[dict]:
-    """Runs (or resumes) one turn and yields normalised events:
-    status, tool_input, tool_output, evidence, draft_start, token, verification,
-    approval_required, final_answer."""
-    config: dict[str, Any] = {"configurable": {"thread_id": session_id}}
-    if callbacks:
-        config["callbacks"] = callbacks
-    payload: Any = Command(resume=resume) if resume is not None else {"messages": [HumanMessage(content=prompt or "")]}
-    for mode, chunk in graph.stream(payload, config=config, stream_mode=["custom", "messages", "updates"]):
-        if mode == "custom" and isinstance(chunk, dict):
-            yield chunk
-        elif mode == "messages":
-            message, meta = chunk
-            if (meta or {}).get("langgraph_node") == "reasoner":
-                text = _text(getattr(message, "content", ""), strip=False)
-                if text:
-                    yield {"type": "token", "text": text}
-        elif mode == "updates" and isinstance(chunk, dict) and "__interrupt__" in chunk:
-            for intr in chunk["__interrupt__"]:
-                yield {"type": "approval_required", **dict(intr.value)}
-
-
-def collect_final(events: Iterable[dict]) -> tuple[str, dict | None]:
-    """Drains events; returns (final answer text, pending approval request or None)."""
-    final, pending = "", None
-    for event in events:
-        if event.get("type") == "final_answer":
-            final = event.get("content", "")
-        elif event.get("type") == "approval_required":
-            pending = event
-    return final, pending
