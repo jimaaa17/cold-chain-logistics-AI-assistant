@@ -5,7 +5,6 @@ import re
 import sys
 import threading
 import time
-import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -31,6 +30,8 @@ logger = logging.getLogger("api.server")
 # 1. PURE SSE & AUDIT STREAMING ENGINE
 # ==========================================
 SIMULATED_AUDIT_PREFIX = "[SIMULATED: AGENT_OFFLINE_DEMO] "
+PROMPT_AUDIT_NODE = "user_input"
+PROMPT_AUDIT_TOOL = "Dispatcher"
 
 
 def _sse_frame(event_type: str, payload: dict[str, Any]) -> str:
@@ -62,6 +63,17 @@ def generate_dispatch_sse_frames(
     final_emitted = False
     simulated_announced = False
     try:
+        # The operator's prompt is the first audit row of every turn (as in AgentOrchestrator.stream).
+        writer_fn(session_id, PROMPT_AUDIT_NODE, PROMPT_AUDIT_TOOL, prompt)
+        bridge.record_span(
+            session_id,
+            PROMPT_AUDIT_NODE,
+            PROMPT_AUDIT_TOOL,
+            prompt,
+            trace_id=trace_id,
+            span_id=new_span_id(),
+            elapsed_ms=0,
+        )
         for step in streamer_fn(session_id, prompt):
             elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
             step_type = step.get("type")
@@ -148,64 +160,63 @@ def generate_dispatch_sse_frames(
 # ==========================================
 # 2. DEFAULT DATABASE & ORCHESTRATOR ADAPTERS
 # ==========================================
-_ENGINE_CACHE: dict[tuple[str, str, str], Any] = {}
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_EXPORTER: Any = None
+_ADMIN_ENGINES: dict[str, Any] = {}
 
 
-def _build_mssql_engine(user: str, password: str):
-    from sqlalchemy import create_engine
+def _get_audit_exporter():
+    """SQL audit sink built once from AgentSettings: same host/port/database/driver as the
+    telemetry tool, written as the agent's INSERT-only role. Not cached on failure."""
+    global _AUDIT_EXPORTER
+    if _AUDIT_EXPORTER is not None:
+        return _AUDIT_EXPORTER
+    with _AUDIT_LOCK:
+        if _AUDIT_EXPORTER is None:
+            from agent.config import get_agent_settings
+            from observability import SqlAuditLedgerExporter
 
-    db_host = os.getenv("SQL_SERVER_HOST", "localhost")
-    db_port = os.getenv("SQL_SERVER_PORT", "1433")
-    cache_key = (db_host, db_port, user)
-    if cache_key in _ENGINE_CACHE:
-        return _ENGINE_CACHE[cache_key]
+            settings = get_agent_settings()
+            engine = None
+            if settings.audit_enabled:
+                from agent.tools.telemetry_sql import create_telemetry_engine
 
-    conn_str = (
-        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-        f"SERVER={db_host},{db_port};"
-        f"DATABASE=master;"
-        f"UID={user};"
-        f"PWD={password};"
-        f"Encrypt=no;"
-        f"TrustServerCertificate=yes;"
-    )
-    params = urllib.parse.quote_plus(conn_str)
-    engine = create_engine(
-        f"mssql+pyodbc:///?odbc_connect={params}",
-        pool_pre_ping=True,
-        pool_size=2,
-        max_overflow=2,
-    )
-    _ENGINE_CACHE[cache_key] = engine
-    return engine
+                engine = create_telemetry_engine(settings)
+            _AUDIT_EXPORTER = SqlAuditLedgerExporter(
+                engine=engine, enabled=settings.audit_enabled, table_name=settings.audit_table
+            )
+    return _AUDIT_EXPORTER
 
 
 def default_audit_writer(session_id: str, node_name: str, tool_name: str, content: str) -> None:
-    """Silently writes agent execution traces to FDE_VIEWS.AgentAuditLog using agent permissions."""
+    """Writes one row to the audit ledger. Never raises: a failed write is logged, not fatal."""
     try:
-        from sqlalchemy import text
-
-        db_user = os.getenv("SQL_AGENT_USER", "USR_FDE_RO")
-        db_password = os.getenv("SQL_AGENT_PASSWORD", "")
-        engine = _build_mssql_engine(db_user, db_password)
-        with engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO FDE_VIEWS.AgentAuditLog (SessionID, NodeExecuted, ToolName, Content)
-                    VALUES (:session_id, :node_name, :tool_name, :content)
-                    """
-                ),
-                {
-                    "session_id": session_id,
-                    "node_name": node_name,
-                    "tool_name": tool_name,
-                    "content": content,
-                },
-            )
-            conn.commit()
+        _get_audit_exporter().export_span(  # logs its own warning when the INSERT fails
+            session_id=session_id,
+            trace_id="",
+            span_id="",
+            node_executed=node_name,
+            tool_name=tool_name,
+            content=content,
+        )
     except Exception as exc:
-        print(f"Audit Log Failed (Silent): {exc}")
+        logger.warning("Audit ledger unavailable, row not written: %s", _describe_config_error(exc))
+
+
+def _admin_engine(username: str, password: str):
+    """Engine for the audit reader: configured server/database, admin credentials from the request.
+    Only called after the credentials matched SQL_ADMIN_USER / SQL_ADMIN_PASSWORD."""
+    if username not in _ADMIN_ENGINES:
+        from pydantic import SecretStr
+
+        from agent.config import get_agent_settings
+        from agent.tools.telemetry_sql import create_telemetry_engine
+
+        admin_settings = get_agent_settings().model_copy(
+            update={"sql_agent_user": username, "sql_agent_password": SecretStr(password)}
+        )
+        _ADMIN_ENGINES[username] = create_telemetry_engine(admin_settings)
+    return _ADMIN_ENGINES[username]
 
 
 def default_audit_reader(
@@ -224,7 +235,10 @@ def default_audit_reader(
         raise PermissionError("Invalid Administrator Credentials.")
 
     try:
-        engine = _build_mssql_engine(username, password)
+        from agent.config import get_agent_settings
+
+        audit_table = get_agent_settings().audit_table
+        engine = _admin_engine(username, password)
         clauses = []
         params: dict[str, Any] = {"limit": int(limit)}
         if session_id_filter:
@@ -238,7 +252,7 @@ def default_audit_reader(
         query = text(
             f"""
             SELECT TOP (:limit) LogID, Timestamp, SessionID, NodeExecuted, ToolName, Content
-            FROM FDE_VIEWS.AgentAuditLog
+            FROM {audit_table}
             {where_sql}
             ORDER BY Timestamp DESC
             """
@@ -253,8 +267,12 @@ def default_audit_reader(
                     item["Timestamp"] = item["Timestamp"].isoformat()
                 rows.append(item)
             return rows
-    except Exception:
-        # Fallback to the Langfuse/in-memory span buffer when MSSQL is unreachable in local dev
+    except Exception as exc:
+        # MSSQL unreachable (typically local dev): serve the in-memory span buffer instead.
+        logger.warning(
+            "Audit reader: SQL ledger unavailable, serving in-memory spans instead: %s",
+            _describe_config_error(exc),
+        )
         return get_langfuse_bridge().query_spans(
             session_id_filter=session_id_filter,
             node_filter=node_filter,
@@ -382,10 +400,10 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
         "name": "query_telemetry_db",
         "args": {
             "sql_query": (
-                "SELECT TOP 5 TS_UTC, V_LAT, V_LON, IOT_TEMP_VAL_C, CGO_COND_CD, "
-                "RISK_CLS_TXT, DELAY_PROB_DEC, PRT_CNG_LVL "
-                "FROM FDE_VIEWS.VW_ACTIVE_FLEET WHERE IOT_TEMP_VAL_C > 4.0 OR PRT_CNG_LVL > 7.0 "
-                "ORDER BY IOT_TEMP_VAL_C DESC"
+                "SELECT TOP 5 Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, "
+                "Risk_Classification, Delay_Probability, Port_Congestion_Level "
+                "FROM FDE_VIEWS.VW_ACTIVE_FLEET WHERE Current_Temperature_C > 4.0 OR Port_Congestion_Level > 7.0 "
+                "ORDER BY Current_Temperature_C DESC"
             )
         },
     }
@@ -396,7 +414,8 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
         "node": "tools",
         "name": "query_telemetry_db",
         "content": (
-            "COLUMNS: TS_UTC, V_LAT, V_LON, IOT_TEMP_VAL_C, CGO_COND_CD, RISK_CLS_TXT, DELAY_PROB_DEC, PRT_CNG_LVL\n"
+            "COLUMNS: Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, "
+            "Risk_Classification, Delay_Probability, Port_Congestion_Level\n"
             "('2026-11-14T23:35:00Z', 33.74, -118.27, 6.8, 'BREACH', 'High Risk', 0.81, 8.4)\n"
             "('2026-11-14T23:32:00Z', 33.77, -118.19, 4.9, 'ALERT', 'High Risk', 0.72, 7.6)"
         ),
@@ -430,8 +449,9 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
         "name": "LLM Text Synthesis",
         "content": (
             "🚨 **Operational Resolution Report (Cited: Cold_Chain_Incident_SOP_v2.md §3.2)**\n\n"
-            "1. **Critical Thermal Breach Detected**: Unit at GPS `(33.74, -118.27)` reports `IOT_TEMP_VAL_C = 6.8°C` "
-            "(exceeding the `4.0°C` threshold) with `PRT_CNG_LVL = 8.4` (`> 7.0`) and `DELAY_PROB_DEC = 0.81` (`> 0.65`).\n"
+            "1. **Critical Thermal Breach Detected**: Unit at GPS `(33.74, -118.27)` reports `Current_Temperature_C = 6.8°C` "
+            "(SOP threshold `IOT_TEMP_VAL_C > 4.0`) with `Port_Congestion_Level = 8.4` (`PRT_CNG_LVL > 7.0`) "
+            "and `Delay_Probability = 0.81` (`DELAY_PROB_DEC > 0.65`).\n"
             "2. **Mandatory SOP Mitigation**: Engage secondary compressor override immediately and reroute to the "
             "San Pedro Cold-Storage Staging Hub within 45 minutes.\n"
             "3. **Audit Status**: Execution spans logged to `FDE_VIEWS.AgentAuditLog` (`USR_FDE_RO`) and `Langfuse`."
@@ -500,6 +520,80 @@ def default_agent_streamer(session_id: str, prompt: str) -> Iterable[dict[str, A
                         }
 
 
+def default_session_purger(session_id: str) -> bool:
+    """Deletes the conversation memory (LangGraph checkpoint) for `session_id` in this process.
+
+    Returns True when no memory for that session remains afterwards. The checkpointer is the
+    in-process MemorySaver, so with several workers each holds its own copy (see onboarding Q4).
+    """
+    graph = _ACTIVE_GRAPH
+    if graph is None:  # graph never built in this process, so it holds no memory to delete
+        return True
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is None or not hasattr(checkpointer, "delete_thread"):
+        logger.warning("Session purge: checkpointer cannot delete threads; memory for the session is kept.")
+        return False
+    checkpointer.delete_thread(session_id)
+    return True
+
+
+def build_purge_payload(
+    old_session_id: Optional[str], purger: Callable[[str], bool] = default_session_purger
+) -> dict[str, Any]:
+    """`/api/v1/session/purge` for both servers: clears the old thread's memory, mints a new id."""
+    purged = True
+    if old_session_id:
+        try:
+            purged = bool(purger(old_session_id))
+        except Exception as exc:
+            logger.warning("Session purge failed: %s", _describe_config_error(exc))
+            purged = False
+    return {"purged": purged, "previous_session_id": old_session_id, "session_id": str(uuid.uuid4())}
+
+
+META_CAPABILITIES = {
+    "telemetry_db": ["past_history", "present_snapshot", "future_risk_predictions"],
+    "weather_corridor": ["past_days", "current_weather", "forecast_days"],
+    "sop_rag": ["post_incident_audit", "active_thresholds", "preventive_escalation"],
+}
+
+
+def build_meta_payload() -> dict[str, Any]:
+    """`/api/v1/meta` for both servers. Reads the same settings objects the agent and RAG use, so
+    the reported LLM and embeddings provider can't drift from what actually runs."""
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "service": "fde-dispatch-bff",
+        "agent_llm": None,
+        "agent_model": None,
+        "embeddings_model": None,
+        "observability": get_langfuse_bridge().status(),
+        "capabilities": META_CAPABILITIES,
+    }
+    config_errors: list[str] = []
+    try:
+        from agent.config import get_agent_settings
+
+        agent_cfg = get_agent_settings()
+        payload["agent_llm"] = agent_cfg.agent_llm
+        payload["agent_model"] = {
+            "GEMINI": agent_cfg.gemini_model,
+            "OPENAI": agent_cfg.openai_model,
+            "OLLAMA": agent_cfg.ollama_model,
+        }.get(agent_cfg.agent_llm)
+    except Exception as exc:
+        config_errors.append(f"agent: {_describe_config_error(exc)}")
+    try:
+        from rag.config import get_settings as get_rag_settings
+
+        payload["embeddings_model"] = get_rag_settings().embeddings_provider
+    except Exception as exc:
+        config_errors.append(f"rag: {_describe_config_error(exc)}")
+    if config_errors:
+        payload["config_errors"] = config_errors
+    return payload
+
+
 # ==========================================
 # 3. FASTAPI APPLICATION FACTORY
 # ==========================================
@@ -507,6 +601,7 @@ def create_app(
     agent_streamer: Optional[Callable[[str, str], Iterable[dict[str, Any]]]] = None,
     audit_writer: Optional[Callable[[str, str, str, str], None]] = None,
     audit_reader: Optional[Callable[..., list[dict[str, Any]]]] = None,
+    session_purger: Optional[Callable[[str], bool]] = None,
 ):
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, HTTPException
@@ -531,6 +626,7 @@ def create_app(
     streamer_fn = agent_streamer or default_agent_streamer
     writer_fn = audit_writer or default_audit_writer
     reader_fn = audit_reader or default_audit_reader
+    purger_fn = session_purger or default_session_purger
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -558,21 +654,7 @@ def create_app(
 
     @app.get("/api/v1/meta")
     def get_meta():
-        default_llm = "GEMINI" if (os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_APKEY")) else "OLLAMA"
-        llm_setting = (os.getenv("Agent_llm") or os.getenv("llm") or default_llm).strip().upper()
-        embeddings_setting = os.getenv("Embeddings_model", "LOCAL").strip().upper()
-        return {
-            "status": "ok",
-            "service": "fde-dispatch-bff",
-            "agent_llm": llm_setting,
-            "embeddings_model": embeddings_setting,
-            "observability": get_langfuse_bridge().status(),
-            "capabilities": {
-                "telemetry_db": ["past_history", "present_snapshot", "future_risk_predictions"],
-                "weather_corridor": ["past_days", "current_weather", "forecast_days"],
-                "sop_rag": ["post_incident_audit", "active_thresholds", "preventive_escalation"],
-            },
-        }
+        return build_meta_payload()
 
     @app.get("/api/v1/traces")
     def get_live_traces(
@@ -596,11 +678,7 @@ def create_app(
 
     @app.post("/api/v1/session/purge")
     def purge_session(req: SessionPurgeRequest):
-        return {
-            "purged": True,
-            "previous_session_id": req.old_session_id,
-            "session_id": str(uuid.uuid4()),
-        }
+        return build_purge_payload(req.old_session_id, purger_fn)
 
     @app.post("/api/v1/dispatch/stream")
     def stream_dispatch(req: DispatchStreamRequest):
@@ -644,8 +722,8 @@ except ImportError:  # pragma: no cover
     app = None
 
 
-def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
-    """Zero-dependency HTTP/SSE server for running FE/ + BFF endpoints in any Python environment."""
+def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
+    """Builds (does not start) the zero-dependency HTTP/SSE server. Port 0 picks a free port."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
 
@@ -678,19 +756,7 @@ def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
             if parsed.path == "/healthz":
                 return self._send_json(200, {"status": "ok", "service": "fde-dispatch-bff"})
             if parsed.path == "/api/v1/meta":
-                default_llm = "GEMINI" if (os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_APKEY")) else "OLLAMA"
-                llm_setting = (os.getenv("Agent_llm") or os.getenv("llm") or default_llm).strip().upper()
-                embeddings_setting = os.getenv("Embeddings_model", "LOCAL").strip().upper()
-                return self._send_json(
-                    200,
-                    {
-                        "status": "ok",
-                        "service": "fde-dispatch-bff",
-                        "agent_llm": llm_setting,
-                        "embeddings_model": embeddings_setting,
-                        "observability": get_langfuse_bridge().status(),
-                    },
-                )
+                return self._send_json(200, build_meta_payload())
             if parsed.path == "/api/v1/traces":
                 qs = parse_qs(parsed.query)
                 session_id = qs.get("session_id", [None])[0]
@@ -726,14 +792,7 @@ def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
             body = self._read_json()
 
             if parsed.path == "/api/v1/session/purge":
-                return self._send_json(
-                    200,
-                    {
-                        "purged": True,
-                        "previous_session_id": body.get("old_session_id"),
-                        "session_id": str(uuid.uuid4()),
-                    },
-                )
+                return self._send_json(200, build_purge_payload(body.get("old_session_id")))
 
             if parsed.path == "/api/v1/dispatch/stream":
                 session_id = str(body.get("session_id") or "default-session")
@@ -770,7 +829,12 @@ def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
 
             self._send_json(404, {"detail": "Not Found"})
 
-    server = ThreadingHTTPServer((host, port), BffHandler)
+    return ThreadingHTTPServer((host, port), BffHandler)
+
+
+def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Zero-dependency HTTP/SSE server for running FE/ + BFF endpoints in any Python environment."""
+    server = make_stdlib_server(host, port)
     print(f"🚀 FDE Control Tower (FE + BFF) listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 

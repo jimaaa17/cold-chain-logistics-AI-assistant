@@ -100,7 +100,7 @@ Side effects on every step:
 | 7a | Telemetry tool | [telemetry_sql.py](../../BE/agent/tools/telemetry_sql.py) | `validate_readonly_select` allows one `SELECT` against `FDE_VIEWS.VW_ACTIVE_FLEET` only, with no comments or `;`. The engine is lazy and the query runs as `USR_FDE_RO`, capped at `SQL_MAX_ROWS`. Errors come back as **strings**, not exceptions. |
 | 7b | Corridor tool | [corridor_api.py](../../BE/agent/tools/corridor_api.py) `fetch_corridor_conditions` | Calls Open-Meteo through httpx with `with_retry` (transient errors only), after validating coordinate and day bounds. |
 | 7c | SOP tool | [sop_rag.py](../../BE/agent/tools/sop_rag.py) `search_compliance_sop` | Calls `RetrievalService.from_settings(rag.config.get_settings())` in-process, lazily: the embedder (bge-m3, torch) and the Pinecone client load on the **first call**. It degrades to `SOP_KNOWLEDGE_BASE_UNAVAILABLE`, `SOP_QUERY_REJECTED` or `NO_MATCHING_SOP`. |
-| 8 | Audit / trace | `server.py` `default_audit_writer`; [pipeline.py](../../BE/observability/pipeline.py) | The audit INSERT uses its own engine built from raw `os.getenv` (not `AgentSettings`) and is "silent": failures are `print`ed. Spans go to the ring buffer and Langfuse. |
+| 8 | Audit / trace | `server.py` `default_audit_writer`; [pipeline.py](../../BE/observability/pipeline.py) | The prompt and every step are written through `SqlAuditLedgerExporter`, using the telemetry engine built from `AgentSettings` (INSERT-only role). A failed write is logged and never breaks the stream. Spans go to the ring buffer and Langfuse. |
 | 9 | Render | `FE/src/features/dispatch/components/` | `ReasoningTimeline` and `ToolTraceAccordion` render `traces[]`, and `MessageBubble` renders the Markdown answer. The answer layout is defined in [system_prompt.txt](../../BE/agent/prompts/system_prompt.txt), so **prompt edits are UI edits**. |
 
 ### Data contracts that this path depends on
@@ -144,16 +144,16 @@ Work through these in order. Each one either has a short answer in the code or m
 
 ## 4. Known findings (as of 2026-11-18)
 
-The offline suite passes (101 tests, 1 skipped, after #8) and `python -m agent --dry-run` is OK, yet the live path can still be broken. F1–F3 are resolved; the rest are open:
+The offline suite passes (101 tests, 1 skipped, after #8) and `python -m agent --dry-run` is OK, yet the live path can still be broken. All six findings are resolved:
 
 | ID | Severity | Finding | Location | Status |
 |----|----------|---------|----------|--------|
 | F1 | Critical | `default_agent_streamer` catches **every** exception, or a run that emits nothing, and yields `_offline_fallback_streamer`: hard-coded "BREACH 6.8 °C" rows and an SOP citation. A mid-run failure gives real events **followed by fabricated ones**, all of which are audited as genuine. The UI has no "simulated" marker. | `BE/api/server.py` `default_agent_streamer` | **Fixed in #8**: no canned data after a failure; demo is opt-in, refused when `APP_ENV=production`, and marked `simulated`. |
 | F2 | High | `_get_compiled_graph` falls back to the legacy `src.orchestrator.fde_agent` on any build error, which hides config errors. | `BE/api/server.py` `_get_compiled_graph` | **Fixed in #8**: no legacy fallback; redacted `AgentConfigError`, retried on the next request. |
 | F3 | High | The SOP leg is likely dead locally: there is no `PINECONE_API_KEY` in `.env` and no ingestion manifest, so the tool returns `SOP_KNOWLEDGE_BASE_UNAVAILABLE`. | `.env`, `data/cache/` | **Resolved 2026-11-18** (no code change): the key was present, but the old script had loaded the SOP into the default namespace. `python -m rag.ingestion` loaded it into `sop`. |
-| F4 | Medium | The BFF audit path duplicates config (raw `os.getenv`, `DATABASE=master`, empty-password default), never audits the user prompt, and `print`s its failures. | `BE/api/server.py` `default_audit_writer`, `_build_mssql_engine` | Open |
-| F5 | Medium | Drift: `/meta` computes the LLM differently from `AgentSettings`; the stdlib `/meta` has no `capabilities`; the canned fallback SQL uses legacy column names against the view. | `BE/api/server.py` | Open |
-| F6 | Low | `/session/purge` doesn't clear the checkpointer. | `BE/api/server.py` `purge_session` | Open |
+| F4 | Medium | The BFF audit path duplicates config (raw `os.getenv`, `DATABASE=master`, empty-password default), never audits the user prompt, and `print`s its failures. | `BE/api/server.py` `default_audit_writer`, `_build_mssql_engine` | **Fixed in #12**: writer reuses `SqlAuditLedgerExporter` with the engine from `AgentSettings` (configured database, `AUDIT_ENABLED`, `AUDIT_TABLE`); the reader uses the same server and database with the admin credentials; the prompt is audited as `user_input` / `Dispatcher`; failures are logged. |
+| F5 | Medium | Drift: `/meta` computes the LLM differently from `AgentSettings`; the stdlib `/meta` has no `capabilities`; the canned fallback SQL uses legacy column names against the view. | `BE/api/server.py` | **Fixed in #12**: one `build_meta_payload()` from `AgentSettings` and the `rag` settings, shared by both servers (a test compares them); the demo SQL uses the view aliases. |
+| F6 | Low | `/session/purge` doesn't clear the checkpointer. | `BE/api/server.py` `purge_session` | **Fixed in #12**: purge calls `checkpointer.delete_thread(old_session_id)`; `purged` reports the outcome. |
 
 ---
 
@@ -168,7 +168,7 @@ The offline suite passes (101 tests, 1 skipped, after #8) and `python -m agent -
 | `SOP_KNOWLEDGE_BASE_UNAVAILABLE` | 7c | `PINECONE_API_KEY`, the index name, whether ingestion has run (`python -m rag.ingestion --dry-run`). |
 | `NO_MATCHING_SOP` | 7c | The index is empty or in the wrong namespace or provider (LOCAL vs OPENAI use different indexes). Vectors written by the old `scripts/ingest_sop_pinecone.py` sit in the *default* namespace, not `sop`. |
 | An `error` frame saying "Execution Timeout…" | 4–6 | The LLM never produced a final text. Check the provider key and model name (`GEMINI_MODEL`). |
-| The answer renders but the audit screen is empty | 8 | Look for "Audit Log Failed (Silent)" in the server stdout. The audit reader quietly falls back to in-memory spans when MSSQL is unreachable. |
+| The answer renders but the audit screen is empty | 8 | Look for "SQL Audit ledger write skipped" or "Audit ledger unavailable" warnings in the server log. The audit reader quietly falls back to in-memory spans when MSSQL is unreachable. |
 
 Leg-by-leg commands:
 ```bash
@@ -188,9 +188,9 @@ curl 'localhost:8000/api/v1/traces?session_id=debug-1'      # spans for that run
 0. **Make breakage visible.** Add `python -m agent --smoke`, which checks each leg (LLM, view `SELECT TOP 1`, Open-Meteo, SOP retrieve, audit insert) and prints PASS/FAIL with the reason. Add a `/readyz` endpoint that reports the same.
 1. ✅ **Never fabricate (F1, F2), done in #8.** Put the canned stream behind `AGENT_OFFLINE_DEMO=1` and mark its frames `simulated: true`, with a UI badge. Otherwise an exception becomes an `error` frame with the real reason. Never fall back after real events have streamed. Remove the `src.orchestrator` fallback. Add tests in `tests/test_fe_api.py`.
 2. **Restore SOP RAG (F3).** ✅ Ingestion run and retrieval verified (2026-11-18). Still to do: the smoke check. Add the legacy-name → alias mapping to the system prompt.
-3. **Unify audit and config (F4, F5).** Build the BFF audit and `/meta` from `AgentSettings` and `rag` settings, audit the user prompt, and log failures through `logging`.
-4. **Session and guardrails (F6).** Make purge clear the checkpoint. Add `recursion_limit` and a request timeout.
+3. ✅ **Unify audit and config (F4, F5), done in #12.** Build the BFF audit and `/meta` from `AgentSettings` and `rag` settings, audit the user prompt, and log failures through `logging`.
+4. **Session and guardrails (F6).** ✅ Purge clears the checkpoint (#12). Still to do: `recursion_limit` and a request timeout.
 
-Deferred: stdlib/FastAPI parity tests, a trace_id column in AgentAuditLog, a shared checkpointer for multiple workers.
+Deferred: broader stdlib/FastAPI parity tests (`/meta` and purge are covered), a trace_id column in AgentAuditLog, a shared checkpointer for multiple workers.
 
 **Done means:** with a real `.env`, the question *"Which shipments are above 4 °C near Long Beach and what does the SOP require?"* produces three real tool traces, an SOP citation from `Cold_Chain_Incident_SOP_v2.md`, no simulated badge, matching rows (including the prompt) on the Audit screen, and spans at `/api/v1/traces`. Breaking `GEMINI_API_KEY` must produce a clear error, not a report.
