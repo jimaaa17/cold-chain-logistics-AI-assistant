@@ -1,6 +1,6 @@
 # Plan: split `BE/agent/workflow.py` into a layered `agent/dispatch/` package
 
-Status: draft, nothing changed yet. Reference design: Gen AI `BE/app/agents/rag_agent/`
+Status: Phases 0–3 and 5 done on `refactor/dispatch-package`. Phase 4 (optional tidy-ups) not started. Reference design: Gen AI `BE/app/agents/rag_agent/`
 (topology-only `graph.py`, one module per node, dependencies through `Runtime[ContextSchema]`,
 public input/output schemas).
 
