@@ -78,13 +78,13 @@ python -m legacy_ingest [--dry-run] [--mode refresh|upsert] [--csv PATH] [--forc
   - `context.py`: `DispatchResources` and `DispatchContext` (settings, resources, clock, prompts).
   - `state.py`: internal `DispatchState` plus the public `DispatchInput` (messages) and `DispatchOutput` (messages, final, verification, approval).
   - `events.py`: the custom event shapes.
-  - `prompts.py`: loads `prompts/{reasoner,planner}_prompt.txt` and `clarify_text.txt` once at build.
+  - `prompts/`: one module per step. `reasoner.py` and `planner.py` export `ChatPromptTemplate`s (system text, optional `history` placeholder, human turn) that the nodes render with `format_messages(...)`; `reasoner.py` also has the optional `gaps_block` / `retry_block` sections. `clarify.py` is a plain `CLARIFY_TEXT`. `DispatchContext` holds the templates, so tests can inject others. Double any literal `{` / `}` in template text.
   - `streaming.py`: `iter_dispatch_events`, `pending_approval` and `collect_final`.
 
   Nodes take clients only from `runtime.context` and never build them. `iter_dispatch_events` is the one place the graph runs, and it passes `context=graph.dispatch_context`; a direct `graph.stream`/`invoke` must do the same.
 
   The flow: `intake` routes the question in code (`intent.py`): `incident_scan` fans out telemetry + weather + SOP in parallel with `Send` (no LLM planning call), `sop_lookup` searches the SOP only, `open` lets an LLM `planner` pick tool calls, `clarify` answers without tools. Results go to `ledger` (`evidence.py`: records with source, fields, `as_of`, and `fresh`/`historical`/`undated`/`forecast` by `EVIDENCE_FRESHNESS_HOURS`, default 24) and `rules` (`rules.py`: SOP §1–§3 as code; only fresh telemetry triggers actions; weather never does). The `reasoner` LLM writes from the ledger and tags actions as `ACTION[id] on [T1]`; the `verifier` (`verifier.py`, plain code) checks numbers, citations, permitted actions, freshness wording and trigger coverage, sends the draft back **once**, then labels it unverified. `action_gate` calls `interrupt()` for high-stakes actions (diversions, write-offs) and resumes with the dispatcher's decision; `finalize` renders actions, verification and the decision. Nodes emit events through `runtime.stream_writer`; `iter_dispatch_events` adapts them (plus reasoner tokens) for the BFF. `DispatchResources` holds the shared LLM, SQL engine, HTTP client and `RetrievalService`, and `warm()` pre-loads them.
-- `prompts/reasoner_prompt.txt`: the reasoner's rules and answer layout. The verifier enforces rules 1–5, so keep the two consistent.
+- `dispatch/prompts/reasoner.py`: the reasoner's rules and answer layout. The verifier enforces rules 1–5, so keep the two consistent.
 - When the SOP changes, update `rules.py` (thresholds, permitted actions, `HIGH_STAKES_ACTIONS`). The emergency cold-storage diversion is not permitted because telemetry has no ETA-delay field.
 
 The previous single ReAct loop remains for comparison (`--legacy-react`) and its tests:

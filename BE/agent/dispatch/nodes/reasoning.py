@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from agent.dispatch.context import DispatchContext
+from agent.dispatch.prompts import gaps_block, retry_block
 from agent.dispatch.state import DispatchState
 from agent.dispatch.text import history, text_of
 from agent.evidence import render_ledger
@@ -22,16 +22,14 @@ def reasoner(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
         state.get("ledger", []), state.get("triggers", []), state.get("historical", []),
         now=now, window_hours=ctx.settings.evidence_freshness_hours,
     )
-    if state.get("gaps"):
-        ledger_text += "\n\nDATA GAPS (say these sources were unavailable; do not guess):\n" + "\n".join(f"- {g}" for g in state["gaps"])
-    content = f"QUESTION:\n{state['question']}\n\n{ledger_text}"
     previous = state.get("verification") or {}
-    if attempt > 1 and previous.get("problems"):
-        content += (
-            "\n\nYOUR PREVIOUS DRAFT WAS REJECTED BY THE AUTOMATIC CHECK. Rewrite it and fix exactly these problems:\n"
-            + "\n".join(f"- {p}" for p in previous["problems"])
-        )
-    msgs = [SystemMessage(ctx.reasoner_system), *history(state), HumanMessage(content)]
+    msgs = ctx.reasoner_prompt.format_messages(
+        history=history(state),
+        question=state["question"],
+        ledger=ledger_text,
+        gaps_block=gaps_block(state.get("gaps") or []),
+        retry_block=retry_block(previous.get("problems") or []) if attempt > 1 else "",
+    )
     ai = ctx.resources.llm().invoke(msgs)
     return {"draft": text_of(ai.content), "attempts": attempt}
 

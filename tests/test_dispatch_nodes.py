@@ -163,7 +163,7 @@ class TestContextWiring(unittest.TestCase):
         self.assertIs(ctx.resources, res)
         self.assertIs(graph.dispatch_resources, res)
         self.assertEqual(ctx.clock(), NOW)
-        self.assertIn("evidence ledger", ctx.reasoner_system.lower())
+        self.assertIn("evidence ledger", ctx.reasoner_prompt.messages[0].prompt.template.lower())
 
 
 class TestPublicSchema(unittest.TestCase):

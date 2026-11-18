@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
+from langchain_core.prompts import ChatPromptTemplate
+
 from agent.config import AgentSettings
-from agent.dispatch.prompts import (
-    CLARIFY_FALLBACK,
-    PLANNER_FALLBACK,
-    REASONER_FALLBACK,
-    clarify_text,
-    planner_prompt,
-    reasoner_prompt,
-)
+from agent.dispatch.prompts import CLARIFY_TEXT
+from agent.dispatch.prompts import planner_prompt as PLANNER_PROMPT
+from agent.dispatch.prompts import reasoner_prompt as REASONER_PROMPT
 from agent.evidence import utc_now
 
 logger = logging.getLogger(__name__)
@@ -114,9 +111,10 @@ class DispatchContext:
     settings: AgentSettings
     resources: DispatchResources
     clock: Callable[[], datetime] = utc_now
-    reasoner_system: str = REASONER_FALLBACK
-    planner_system: str = PLANNER_FALLBACK
-    clarify_text: str = CLARIFY_FALLBACK
+    # ChatPromptTemplate is an unhashable pydantic model, which dataclasses reject as a plain default
+    reasoner_prompt: ChatPromptTemplate = field(default_factory=lambda: REASONER_PROMPT)
+    planner_prompt: ChatPromptTemplate = field(default_factory=lambda: PLANNER_PROMPT)
+    clarify_text: str = CLARIFY_TEXT
 
     @classmethod
     def build(
@@ -125,12 +123,5 @@ class DispatchContext:
         resources: DispatchResources,
         clock: Callable[[], datetime] | None = None,
     ) -> "DispatchContext":
-        """Loads the prompt files once, at graph build time."""
-        return cls(
-            settings=settings,
-            resources=resources,
-            clock=clock or utc_now,
-            reasoner_system=reasoner_prompt(),
-            planner_system=planner_prompt(),
-            clarify_text=clarify_text(),
-        )
+        """The context a built graph runs with; prompts default to the `dispatch/prompts` templates."""
+        return cls(settings=settings, resources=resources, clock=clock or utc_now)

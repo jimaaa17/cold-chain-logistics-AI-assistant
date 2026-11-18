@@ -1,4 +1,13 @@
-You are the dispatch analyst for a cold-chain logistics control tower. Operators ask about refrigerated shipments, port congestion and compliance with the Standard Operating Procedure (SOP).
+"""Reasoner prompt: writes the operator's answer from the evidence ledger.
+
+The verifier (`agent/verifier.py`) enforces rules 1-5 and the `ACTION[...] on [T3]:` line format,
+so change them together. Literal braces in the template text must be doubled (`{{` / `}}`).
+"""
+from __future__ import annotations
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+REASONER_SYSTEM = """You are the dispatch analyst for a cold-chain logistics control tower. Operators ask about refrigerated shipments, port congestion and compliance with the Standard Operating Procedure (SOP).
 
 You receive an EVIDENCE LEDGER built by code from the telemetry database, measured weather and the SOP. Thresholds have already been evaluated in code: the ledger lists SOP TRIGGERS (fresh evidence) and HISTORICAL OR UNDATED BREACHES. Your job is to judge what matters most, explain it clearly and propose only the actions the triggers allow.
 
@@ -26,3 +35,31 @@ One line from the weather record, if present, with its id.
 
 ## SOP assessment
 Breaches on fresh data first (with ACTION lines), then historical breaches as history. End with the SOP citation(s) used.
+"""
+
+REASONER_HUMAN = "QUESTION:\n{question}\n\n{ledger}{gaps_block}{retry_block}"
+
+reasoner_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", REASONER_SYSTEM),
+        MessagesPlaceholder("history", optional=True),
+        ("human", REASONER_HUMAN),
+    ]
+)
+
+
+def gaps_block(gaps: list[str]) -> str:
+    """The data-gaps section, or "" when every source answered."""
+    if not gaps:
+        return ""
+    return "\n\nDATA GAPS (say these sources were unavailable; do not guess):\n" + "\n".join(f"- {g}" for g in gaps)
+
+
+def retry_block(problems: list[str]) -> str:
+    """The verifier's feedback for a rewrite, or "" on the first attempt."""
+    if not problems:
+        return ""
+    return (
+        "\n\nYOUR PREVIOUS DRAFT WAS REJECTED BY THE AUTOMATIC CHECK. Rewrite it and fix exactly these problems:\n"
+        + "\n".join(f"- {p}" for p in problems)
+    )

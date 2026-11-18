@@ -1,7 +1,6 @@
 """planner (an LLM picks tool calls for open questions) and the router that fans them out."""
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 from langgraph.types import Send
 
@@ -19,7 +18,7 @@ _TOOL_TO_NODE = {
 
 def planner(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
     ctx = runtime.context
-    msgs = [SystemMessage(ctx.planner_system), *history(state), HumanMessage(state["question"])]
+    msgs = ctx.planner_prompt.format_messages(history=history(state), question=state["question"])
     ai = ctx.resources.planner_llm().invoke(msgs)
     calls = [{"name": tc["name"], "args": dict(tc.get("args") or {})} for tc in (getattr(ai, "tool_calls", None) or [])]
     return {"planned_calls": calls}
