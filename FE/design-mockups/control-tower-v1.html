@@ -1,73 +1,739 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FDE Supply Chain Dispatch Console — Product Design Mockup v1</title>
+  <title>RouteGuard — Executive Operations Briefing</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    body { background-color: #0B0E14; color: #E2E8F0; font-family: Inter, system-ui, -apple-system, sans-serif; }
-    .surface-sidebar { background-color: #111622; border-right: 1px solid #1E293B; }
-    .surface-card { background-color: #111622; border: 1px solid #1E293B; }
-    .code-pill { background-color: #1E293B; color: #38BDF8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* =====================================================================
+       FE/DESIGN.md ENFORCED TOKENS (Zero AI Slop: No Emojis, No Nested Cards,
+       No Rainbow Pills, 5-Step Warm Stone Grayscale, Tabular Numerals)
+       ===================================================================== */
+    :root {
+      --canvas: #F7F7F5;
+      --surface: #FFFFFF;
+      --surface-subtle: #F0F0EC;
+      --border-outer: #E4E4E0;
+      --border-hairline: #EFECE6;
+      --ink-primary: #111110;
+      --ink-secondary: #575653;
+      --ink-muted: #8C8B85;
+      --accent: #0F52BA;
+      --signal-critical: #C81E1E;
+      --signal-warning: #B45309;
+      --signal-healthy: #15803D;
+    }
+
+    body {
+      background-color: var(--canvas);
+      color: var(--ink-primary);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: -0.011em;
+    }
+
+    .tabular {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+    }
+
+    .surface-sheet {
+      background-color: var(--surface);
+      border: 1px solid var(--border-outer);
+      box-shadow: 0 1px 2px rgba(17, 17, 16, 0.03);
+    }
+
+    .hairline-t {
+      border-top: 1px solid var(--border-hairline);
+    }
+
+    .hairline-b {
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .row-hover {
+      transition: background-color 0.12s ease;
+    }
+    .row-hover:hover {
+      background-color: #FAFAF8;
+    }
+
+    .omnibar {
+      background-color: var(--surface);
+      border: 1px solid var(--border-outer);
+      box-shadow: 0 2px 8px rgba(17, 17, 16, 0.03);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .omnibar:focus-within {
+      border-color: var(--ink-primary);
+      box-shadow: 0 4px 16px rgba(17, 17, 16, 0.06);
+    }
+
+    .drawer-backdrop {
+      background-color: rgba(17, 17, 16, 0.24);
+      backdrop-filter: blur(2px);
+    }
   </style>
 </head>
-<body class="min-h-screen flex">
-  <!-- Static Product Design Reference Mockup for FE/ -->
-  <aside class="w-72 surface-sidebar p-5 flex flex-col justify-between">
-    <div class="space-y-6">
-      <div class="flex items-center gap-3">
-        <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-400/30 flex items-center justify-center text-xl">🧊</div>
-        <div>
-          <h1 class="font-bold text-base text-slate-100">FDE Command Center</h1>
-          <p class="text-xs text-slate-400">Control Tower v2.0 (FE)</p>
+<body class="min-h-screen flex flex-col">
+
+  <!-- ===================================================================== -->
+  <!-- TOP ARCHITECTURAL HEADER                                              -->
+  <!-- ===================================================================== -->
+  <header class="bg-[#F7F7F5]/90 backdrop-blur-md sticky top-0 z-30 border-b border-[#E4E4E0]">
+    <div class="max-w-6xl mx-auto px-8 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-6">
+        <div class="flex items-center gap-2.5">
+          <svg class="w-4 h-4 text-[#111110]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+          <span class="font-semibold text-sm tracking-tight text-[#111110]">RouteGuard</span>
+          <span class="text-[#8C8B85] text-xs">/</span>
+          <span class="text-xs text-[#575653]">Southern California Corridor</span>
+        </div>
+
+        <!-- 90% Healthy Fleet Collapsed Status (Restrained Dot + Tabular Text) -->
+        <div class="hidden md:flex items-center gap-2 text-xs text-[#575653] pl-4 border-l border-[#E4E4E0]">
+          <span class="w-1.5 h-1.5 rounded-full bg-[#15803D]"></span>
+          <span><strong class="font-medium text-[#111110] tabular">44 / 48</strong> active loads on schedule</span>
         </div>
       </div>
-      <nav class="space-y-2">
-        <div class="px-3 py-2.5 rounded-lg bg-sky-500/15 border border-sky-400/40 text-sky-300 text-sm font-medium">
-          🧊 Dispatch Console
-        </div>
-        <div class="px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800/50 text-sm font-medium">
-          🛡️ Security &amp; Audit Logs
-        </div>
-      </nav>
-      <div class="pt-4 border-t border-slate-800 space-y-2 text-xs">
-        <div class="flex justify-between text-slate-400">
-          <span>Session Token</span>
-          <span class="code-pill px-1.5 py-0.5 rounded">a8f391c2...</span>
-        </div>
-        <div class="flex justify-between text-slate-400">
-          <span>Reasoning LLM</span>
-          <span class="code-pill px-1.5 py-0.5 rounded">GEMINI</span>
-        </div>
+
+      <!-- Prototype State Switcher (Clean Text Tabs, No Toy Pills) -->
+      <div class="flex items-center gap-1 text-xs">
+        <span class="text-[#8C8B85] mr-2 hidden sm:inline">View state:</span>
+        <button onclick="setView('briefing')" id="tab-briefing" class="px-2.5 py-1 rounded bg-[#111110] text-white font-medium transition">
+          Exceptions (3)
+        </button>
+        <button onclick="setView('allclear')" id="tab-allclear" class="px-2.5 py-1 rounded text-[#575653] hover:text-[#111110] transition">
+          All Clear
+        </button>
+        <button onclick="setView('loading')" id="tab-loading" class="px-2.5 py-1 rounded text-[#575653] hover:text-[#111110] transition">
+          Scanning
+        </button>
+        <button onclick="setView('offline')" id="tab-offline" class="px-2.5 py-1 rounded text-[#575653] hover:text-[#111110] transition">
+          Signal Loss
+        </button>
       </div>
     </div>
-    <button class="w-full py-2 px-3 rounded-lg border border-rose-500/40 bg-rose-500/10 text-rose-300 text-xs font-medium hover:bg-rose-500/20">
-      🗑️ Purge Dispatch Workspace Session
-    </button>
-  </aside>
+  </header>
 
-  <main class="flex-1 p-8 space-y-6">
-    <header class="border-b border-slate-800 pb-4 flex items-center justify-between">
-      <div>
-        <h2 class="text-2xl font-bold text-slate-100">Cold-Chain Incident Control Dashboard</h2>
-        <p class="text-sm text-slate-400">Production Data Engineering Pipeline • Real-Time Decision Optimization Platform</p>
+  <!-- ===================================================================== -->
+  <!-- MAIN WORKSPACE (Strict Editorial Grid, No Nested Boxes)               -->
+  <!-- ===================================================================== -->
+  <main class="flex-1 max-w-6xl w-full mx-auto px-8 py-10 space-y-10">
+
+    <!-- 1. EXECUTIVE BRIEFING HEADER & NATURAL LANGUAGE COMMAND BAR -->
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-end">
+      <div class="lg:col-span-7 space-y-2">
+        <div class="text-[11px] font-medium uppercase tracking-widest text-[#8C8B85]">
+          Exception Triage Briefing • Updated 14:22 PST
+        </div>
+        <h1 class="text-2xl sm:text-[28px] font-semibold text-[#111110] tracking-tight leading-snug">
+          Three shipments require intervention to protect <span class="tabular">$49,450</span> in SLA and cargo exposure.
+        </h1>
       </div>
-      <div class="flex gap-3 text-xs">
-        <div class="surface-card px-3 py-2 rounded-lg">
-          <span class="text-slate-400 block">Excursion Threshold</span>
-          <span class="font-mono text-sky-400 font-semibold">IOT_TEMP_VAL_C &gt; 4.0°C</span>
+
+      <!-- Tabular Executive KPI Strip (Right-Aligned, Hairline Divided, Zero Boxes) -->
+      <div class="lg:col-span-5 grid grid-cols-3 border-l border-[#E4E4E0] pl-6 gap-4">
+        <div>
+          <div class="text-[11px] text-[#8C8B85] uppercase tracking-wider">At-Risk Value</div>
+          <div class="text-lg font-semibold text-[#111110] tabular mt-0.5">$49,450</div>
         </div>
-        <div class="surface-card px-3 py-2 rounded-lg">
-          <span class="text-slate-400 block">Congestion Gate</span>
-          <span class="font-mono text-amber-400 font-semibold">PRT_CNG_LVL &gt; 7.0</span>
+        <div>
+          <div class="text-[11px] text-[#8C8B85] uppercase tracking-wider">Mitigation Cost</div>
+          <div class="text-lg font-semibold text-[#111110] tabular mt-0.5">$300</div>
         </div>
-        <div class="surface-card px-3 py-2 rounded-lg">
-          <span class="text-slate-400 block">Delay Risk Gate</span>
-          <span class="font-mono text-rose-400 font-semibold">DELAY_PROB_DEC &gt; 0.65</span>
+        <div>
+          <div class="text-[11px] text-[#8C8B85] uppercase tracking-wider">Net Protected</div>
+          <div class="text-lg font-semibold text-[#15803D] tabular mt-0.5">$49,150</div>
         </div>
       </div>
-    </header>
+    </section>
+
+    <!-- EXECUTIVE QUESTION BAR (Zero Emojis, Crisp SVG Iconography) -->
+    <section class="space-y-3">
+      <div class="omnibar rounded-lg p-1.5 pl-4 flex items-center gap-3">
+        <svg class="w-4 h-4 text-[#8C8B85] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input
+          id="exec-question-input"
+          type="text"
+          placeholder="Ask a direct operational question (e.g., 'What is our financial exposure today?' or 'Why is #118 warming?')..."
+          class="w-full text-sm text-[#111110] placeholder-[#8C8B85] focus:outline-none bg-transparent"
+          onkeydown="if(event.key==='Enter') runExecutiveAsk()"
+        />
+        <button onclick="runExecutiveAsk()" class="px-4 py-2 rounded bg-[#111110] hover:bg-[#2A2A28] text-white text-xs font-medium shrink-0 transition">
+          Ask Briefing
+        </button>
+      </div>
+
+      <!-- Subtle Text Prompts (No Toy Emoji Chips) -->
+      <div class="flex flex-wrap items-center gap-5 text-xs text-[#575653] pl-1">
+        <span class="text-[#8C8B85]">Inquiries:</span>
+        <button onclick="askPreset('exposure')" class="hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE] hover:decoration-[#111110] transition">
+          Summarize financial exposure &amp; ROI
+        </button>
+        <button onclick="askPreset('coldchain')" class="hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE] hover:decoration-[#111110] transition">
+          Cold-chain thermal drift status
+        </button>
+        <button onclick="askPreset('docks')" class="hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE] hover:decoration-[#111110] transition">
+          Receiving warehouse dock bottlenecks
+        </button>
+      </div>
+
+      <!-- Executive Answer Sheet (Appears cleanly when queried) -->
+      <div id="ai-answer-box" class="hidden surface-sheet rounded-lg p-5 space-y-2 border-l-2 border-l-[#111110]">
+        <div class="flex items-center justify-between">
+          <span id="ai-answer-question" class="text-[11px] font-semibold uppercase tracking-widest text-[#8C8B85]">Briefing Response</span>
+          <button onclick="document.getElementById('ai-answer-box').classList.add('hidden')" class="text-xs text-[#8C8B85] hover:text-[#111110]">Close</button>
+        </div>
+        <p id="ai-answer-text" class="text-sm text-[#111110] leading-relaxed max-w-4xl"></p>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 1: THE EXCEPTION LEDGER (Single Unified Sheet, Hairline Rows)  -->
+    <!-- =================================================================== -->
+    <section id="view-briefing" class="space-y-4">
+
+      <!-- Act-with-Undo Low-Risk Notification Strip -->
+      <div id="undo-banner" class="surface-sheet rounded-lg px-5 py-3 flex flex-wrap items-center justify-between gap-4 text-xs">
+        <div class="flex items-center gap-3">
+          <span class="w-1.5 h-1.5 rounded-full bg-[#0F52BA]"></span>
+          <span class="font-medium text-[#111110]">Automated Comms Executed:</span>
+          <span class="text-[#575653]">
+            Revised arrival window (<span class="tabular">+2.5 hrs</span>) transmitted to Ontario Receiving Dock #4 for Shipment #402.
+          </span>
+        </div>
+        <div class="flex items-center gap-4">
+          <span class="text-[#8C8B85] tabular">00:10 window</span>
+          <button onclick="document.getElementById('undo-banner').classList.add('hidden')" class="font-medium text-[#111110] underline underline-offset-4 hover:text-[#C81E1E] transition">
+            Revert notice
+          </button>
+        </div>
+      </div>
+
+      <!-- Filter Bar -->
+      <div class="flex items-center justify-between pt-2">
+        <div class="flex items-center gap-6 text-xs">
+          <button onclick="filterRows('all')" id="filter-all" class="font-semibold text-[#111110] border-b-2 border-[#111110] pb-2">
+            All Exceptions (3)
+          </button>
+          <button onclick="filterRows('cold')" id="filter-cold" class="text-[#575653] hover:text-[#111110] pb-2 transition">
+            Cold-Chain &amp; Cargo (1)
+          </button>
+          <button onclick="filterRows('delay')" id="filter-delay" class="text-[#575653] hover:text-[#111110] pb-2 transition">
+            Late Deliveries (1)
+          </button>
+          <button onclick="filterRows('dock')" id="filter-dock" class="text-[#575653] hover:text-[#111110] pb-2 transition">
+            Driver &amp; Dock (1)
+          </button>
+        </div>
+        <div class="text-[11px] text-[#8C8B85] uppercase tracking-wider hidden sm:block">
+          Ranked by Exposure
+        </div>
+      </div>
+
+      <!-- UNIFIED ARCHITECTURAL LEDGER (Zero Cards-Inside-Cards) -->
+      <div class="surface-sheet rounded-lg overflow-hidden">
+        <!-- Column Headers -->
+        <div class="hidden lg:grid lg:grid-cols-12 gap-6 px-6 py-3 bg-[#F0F0EC]/60 border-b border-[#E4E4E0] text-[11px] font-medium uppercase tracking-wider text-[#575653]">
+          <div class="col-span-3">Shipment &amp; Exposure</div>
+          <div class="col-span-4">1. Plain-English Diagnosis</div>
+          <div class="col-span-3">2. Recommended Action</div>
+          <div class="col-span-2 text-right">3. Decision</div>
+        </div>
+
+        <!-- ROW 1: SHIPMENT #118 (COLD-CHAIN) -->
+        <article id="row-118" data-category="cold" class="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 items-start row-hover hairline-b">
+          <!-- Col 1: Shipment Identity & Financial Metric -->
+          <div class="lg:col-span-3 space-y-1.5">
+            <div class="flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-[#C81E1E]"></span>
+              <span class="font-semibold text-sm text-[#111110] tabular">SHP-118</span>
+              <span class="text-xs text-[#575653]">• Biologics Lot B9</span>
+            </div>
+            <div class="text-xs text-[#575653] pl-4">
+              I-5 North Corridor → Cross-Dock #2
+            </div>
+            <div class="pt-2 pl-4 flex items-baseline gap-2">
+              <span class="text-xs text-[#8C8B85]">Exposure:</span>
+              <span class="text-sm font-semibold text-[#C81E1E] tabular">$48,000</span>
+            </div>
+          </div>
+
+          <!-- Col 2: Element 1 — Plain-English Diagnosis -->
+          <div class="lg:col-span-4 space-y-2">
+            <p class="text-sm text-[#111110] leading-relaxed">
+              Reefer interior drifted to <strong class="tabular font-semibold">6.1°C</strong> (limit <span class="tabular">4.0°C</span>) under <span class="tabular">34°C</span> ambient heatwave load. Thermal spoilage window begins in <span class="tabular">50m</span>.
+            </p>
+            <div class="flex items-center gap-4 text-xs">
+              <button onclick="openDrawer('118')" class="text-[#575653] hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE]">
+                Inspect telemetry &amp; GPS
+              </button>
+              <button onclick="openSimulator('SHP-118', 120)" class="text-[#575653] hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE]">
+                Simulate trade-offs
+              </button>
+            </div>
+          </div>
+
+          <!-- Col 3: Element 2 — Recommended Action -->
+          <div class="lg:col-span-3 space-y-1.5">
+            <p class="text-sm text-[#111110] leading-relaxed">
+              Trigger auxiliary cooling override and divert to <strong>Cold-Dock Bay 2</strong> (<span class="tabular">11 mi</span> ahead).
+            </p>
+            <div class="text-xs text-[#575653] tabular">
+              Est. cost: +$120 • Protects $48,000
+            </div>
+          </div>
+
+          <!-- Col 4: Element 3 — Primary Decision Controls -->
+          <div class="lg:col-span-2 flex lg:flex-col items-stretch gap-2 lg:items-end justify-end">
+            <button onclick="resolveRow('row-118')" class="px-4 py-2 rounded bg-[#0F52BA] hover:bg-[#0A3D8F] text-white text-xs font-medium transition w-full lg:w-auto text-center">
+              Approve &amp; Execute
+            </button>
+            <button onclick="resolveRow('row-118')" class="px-4 py-1.5 rounded border border-[#D4D4CE] hover:border-[#111110] text-xs text-[#575653] hover:text-[#111110] transition w-full lg:w-auto text-center">
+              Dismiss
+            </button>
+          </div>
+        </article>
+
+        <!-- ROW 2: SHIPMENT #402 (LATE DELIVERY) -->
+        <article id="row-402" data-category="delay" class="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 items-start row-hover hairline-b">
+          <!-- Col 1 -->
+          <div class="lg:col-span-3 space-y-1.5">
+            <div class="flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-[#B45309]"></span>
+              <span class="font-semibold text-sm text-[#111110] tabular">SHP-402</span>
+              <span class="text-xs text-[#575653]">• Cold Freight</span>
+            </div>
+            <div class="text-xs text-[#575653] pl-4">
+              Port of Long Beach → Ontario Hub
+            </div>
+            <div class="pt-2 pl-4 flex items-baseline gap-2">
+              <span class="text-xs text-[#8C8B85]">SLA Penalty:</span>
+              <span class="text-sm font-semibold text-[#B45309] tabular">$1,450</span>
+            </div>
+          </div>
+
+          <!-- Col 2: Diagnosis -->
+          <div class="lg:col-span-4 space-y-2">
+            <p class="text-sm text-[#111110] leading-relaxed">
+              Delayed <strong class="tabular font-semibold">~2.5 hrs</strong> due to severe Port Congestion (<span class="tabular">9/10</span>) and coastal squalls at Terminal Gate 4.
+            </p>
+            <div class="flex items-center gap-4 text-xs">
+              <button onclick="openDrawer('402')" class="text-[#575653] hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE]">
+                Inspect telemetry &amp; GPS
+              </button>
+              <button onclick="openSimulator('SHP-402', 180)" class="text-[#575653] hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE]">
+                Simulate trade-offs
+              </button>
+            </div>
+          </div>
+
+          <!-- Col 3: Action -->
+          <div class="lg:col-span-3 space-y-1.5">
+            <p class="text-sm text-[#111110] leading-relaxed">
+              Reroute via <strong>Corridor B Bypass</strong> (<span class="tabular">+18 mi</span>, saves <span class="tabular">1.8 hrs</span>) &amp; shift Ontario dock slot to <span class="tabular">14:30</span>.
+            </p>
+            <div class="text-xs text-[#575653] tabular">
+              Est. cost: +$180 • Saves $1,270 net
+            </div>
+          </div>
+
+          <!-- Col 4: Decision -->
+          <div class="lg:col-span-2 flex lg:flex-col items-stretch gap-2 lg:items-end justify-end">
+            <button onclick="resolveRow('row-402')" class="px-4 py-2 rounded bg-[#0F52BA] hover:bg-[#0A3D8F] text-white text-xs font-medium transition w-full lg:w-auto text-center">
+              Approve &amp; Execute
+            </button>
+            <button onclick="resolveRow('row-402')" class="px-4 py-1.5 rounded border border-[#D4D4CE] hover:border-[#111110] text-xs text-[#575653] hover:text-[#111110] transition w-full lg:w-auto text-center">
+              Dismiss
+            </button>
+          </div>
+        </article>
+
+        <!-- ROW 3: SHIPMENT #809 (DRIVER & DOCK BOTTLENECK) -->
+        <article id="row-809" data-category="dock" class="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 items-start row-hover">
+          <!-- Col 1 -->
+          <div class="lg:col-span-3 space-y-1.5">
+            <div class="flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-[#B45309]"></span>
+              <span class="font-semibold text-sm text-[#111110] tabular">SHP-809</span>
+              <span class="text-xs text-[#575653]">• Regional Fleet</span>
+            </div>
+            <div class="text-xs text-[#575653] pl-4">
+              I-10 East → Colton Distribution
+            </div>
+            <div class="pt-2 pl-4 flex items-baseline gap-2">
+              <span class="text-xs text-[#8C8B85]">Unloading Risk:</span>
+              <span class="text-sm font-semibold text-[#111110] tabular">75m Queue</span>
+            </div>
+          </div>
+
+          <!-- Col 2: Diagnosis -->
+          <div class="lg:col-span-4 space-y-2">
+            <p class="text-sm text-[#111110] leading-relaxed">
+              Driver approaching mandatory rest limit while Destination <strong>Dock B has <span class="tabular">0</span> forklifts</strong> available for unloading.
+            </p>
+            <div class="flex items-center gap-4 text-xs">
+              <button onclick="openDrawer('809')" class="text-[#575653] hover:text-[#111110] underline underline-offset-4 decoration-[#D4D4CE]">
+                Inspect telemetry &amp; GPS
+              </button>
+            </div>
+          </div>
+
+          <!-- Col 3: Action -->
+          <div class="lg:col-span-3 space-y-1.5">
+            <p class="text-sm text-[#111110] leading-relaxed">
+              Schedule <span class="tabular">45m</span> rest stop at Colton Plaza and reassign arrival to <strong>Dock D</strong> (<span class="tabular">3</span> forklifts ready).
+            </p>
+            <div class="text-xs text-[#15803D] tabular">
+              Est. cost: $0 • Zero net arrival delay
+            </div>
+          </div>
+
+          <!-- Col 4: Decision -->
+          <div class="lg:col-span-2 flex lg:flex-col items-stretch gap-2 lg:items-end justify-end">
+            <button onclick="resolveRow('row-809')" class="px-4 py-2 rounded bg-[#0F52BA] hover:bg-[#0A3D8F] text-white text-xs font-medium transition w-full lg:w-auto text-center">
+              Approve &amp; Execute
+            </button>
+            <button onclick="resolveRow('row-809')" class="px-4 py-1.5 rounded border border-[#D4D4CE] hover:border-[#111110] text-xs text-[#575653] hover:text-[#111110] transition w-full lg:w-auto text-center">
+              Dismiss
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 2: EMPTY STATE ("ALL CLEAR")                                   -->
+    <!-- =================================================================== -->
+    <section id="view-allclear" class="hidden">
+      <div class="surface-sheet rounded-lg p-12 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2.5">
+            <span class="w-2 h-2 rounded-full bg-[#15803D]"></span>
+            <h2 class="text-base font-semibold text-[#111110]">
+              All 48 active shipments are operating on schedule.
+            </h2>
+          </div>
+          <p class="text-sm text-[#575653] pl-4">
+            Zero cold-chain excursions, port bottlenecks, or driver fatigue alerts across the Southern California corridor. Next telemetry sync in <span class="tabular">4 mins</span>.
+          </p>
+        </div>
+        <button onclick="resetRows()" class="px-4 py-2 rounded border border-[#D4D4CE] hover:border-[#111110] text-xs font-medium text-[#111110] shrink-0 transition">
+          Restore Demo Exceptions
+        </button>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 3: LOADING STATE                                               -->
+    <!-- =================================================================== -->
+    <section id="view-loading" class="hidden">
+      <div class="surface-sheet rounded-lg p-12 space-y-2">
+        <div class="text-xs font-mono uppercase tracking-widest text-[#8C8B85]">Telemetry Sync Active</div>
+        <h3 class="text-base font-medium text-[#111110]">
+          Evaluating 22 operational risk factors across 48 active routes...
+        </h3>
+        <p class="text-xs text-[#575653]">
+          Suppressing normal shipments and isolating exceptions that require leadership sign-off.
+        </p>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- VIEW 4: FALLBACK STATE (SIGNAL LOSS)                                -->
+    <!-- =================================================================== -->
+    <section id="view-offline" class="hidden">
+      <div class="surface-sheet rounded-lg p-6 border-l-2 border-l-[#B45309] flex flex-wrap items-center justify-between gap-6">
+        <div class="space-y-1">
+          <div class="text-[11px] font-semibold uppercase tracking-widest text-[#B45309]">
+            Telemetry Heartbeat Paused • SHP-402
+          </div>
+          <h3 class="text-base font-semibold text-[#111110]">
+            Last verified position: I-710 North near Long Beach (<span class="tabular">33.7701° N, -118.1937° W</span>)
+          </h3>
+          <p class="text-xs text-[#575653]">
+            Last reefer sensor reading was <span class="tabular">3.8°C</span> (<span class="tabular">14 mins</span> ago). Automated rerouting is held pending voice confirmation.
+          </p>
+        </div>
+        <button class="px-4 py-2 rounded bg-[#111110] hover:bg-[#2A2A28] text-white text-xs font-medium transition">
+          Contact Driver (Unit #402)
+        </button>
+      </div>
+    </section>
+
   </main>
+
+  <!-- ===================================================================== -->
+  <!-- TIER 2 SLIDE-OVER EVIDENCE DRAWER (Architectural Table, Zero Slop)    -->
+  <!-- ===================================================================== -->
+  <div id="evidence-drawer" class="hidden fixed inset-0 z-50 flex justify-end drawer-backdrop">
+    <div class="w-full max-w-lg bg-white h-full p-8 overflow-y-auto flex flex-col justify-between border-l border-[#E4E4E0]">
+      <div class="space-y-8">
+        <!-- Drawer Header -->
+        <div class="flex items-start justify-between border-b border-[#EFECE6] pb-5">
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-widest text-[#8C8B85]">Tier 2 • Telemetry Lineage</div>
+            <h3 id="drawer-title" class="text-lg font-semibold text-[#111110] mt-1">SHP-402 Supporting Evidence</h3>
+          </div>
+          <button onclick="closeDrawer()" class="text-xs text-[#575653] hover:text-[#111110] px-2 py-1">
+            Close [Esc]
+          </button>
+        </div>
+
+        <!-- 1. Corridor Vector & GPS Coordinates -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-semibold text-[#111110] uppercase tracking-wider text-[11px]">1. Live Corridor Position</span>
+            <span class="tabular text-[#575653]">33.7542° N, -118.2164° W</span>
+          </div>
+          <div class="py-4 border-y border-[#EFECE6] space-y-3">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[#111110] font-medium">Long Beach Terminal → Ontario Hub</span>
+              <span class="text-[#B45309] font-medium tabular">Port Queue: 9/10</span>
+            </div>
+            <!-- Minimalist Architectural Progress Line -->
+            <div class="relative h-1 bg-[#EFECE6] w-full">
+              <div class="absolute left-0 top-0 h-1 bg-[#111110] w-1/3"></div>
+            </div>
+            <div class="flex justify-between text-[11px] text-[#575653] tabular">
+              <span>Customs Clearance: 42m</span>
+              <span>Corridor B Bypass: -1.8 hrs</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Sensor Readings (Hairline Divided List, Not Nested Boxes) -->
+        <div class="space-y-2">
+          <div class="text-[11px] font-semibold text-[#111110] uppercase tracking-wider">2. Underlying Telemetry Factors</div>
+          <div class="divide-y divide-[#EFECE6] border-y border-[#EFECE6] text-xs">
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">IoT Compartment Temperature</span>
+              <span class="font-medium text-[#111110] tabular">4.2°C (Threshold: 4.0°C)</span>
+            </div>
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">Corridor Traffic Density</span>
+              <span class="font-medium text-[#111110] tabular">8 / 10</span>
+            </div>
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">Driver Fatigue Monitoring Score</span>
+              <span class="font-medium text-[#111110] tabular">0.78 (Rest Advised in 90m)</span>
+            </div>
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">Weather Severity Index</span>
+              <span class="font-medium text-[#111110] tabular">7 / 10 (Coastal Squall)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Destination Warehouse Context -->
+        <div class="space-y-2">
+          <div class="text-[11px] font-semibold text-[#111110] uppercase tracking-wider">3. Destination Receiving Readiness</div>
+          <div class="divide-y divide-[#EFECE6] border-y border-[#EFECE6] text-xs">
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">Ontario Hub Inventory Buffer</span>
+              <span class="font-medium text-[#111110] tabular">68% Capacity</span>
+            </div>
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">Handling Equipment (Dock D)</span>
+              <span class="font-medium text-[#15803D] tabular">3 Heavy Forklifts Ready</span>
+            </div>
+            <div class="py-2.5 flex justify-between">
+              <span class="text-[#575653]">Estimated Unloading Turnaround</span>
+              <span class="font-medium text-[#111110] tabular">35m</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pt-6 border-t border-[#EFECE6] flex justify-end">
+        <button onclick="closeDrawer()" class="px-4 py-2 rounded bg-[#111110] text-white text-xs font-medium">
+          Done Inspecting
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- WHAT-IF SIMULATOR MODAL                                               -->
+  <!-- ===================================================================== -->
+  <div id="simulator-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center drawer-backdrop p-4">
+    <div class="w-full max-w-md bg-white border border-[#E4E4E0] rounded-lg p-6 space-y-6 shadow-xl">
+      <div class="flex items-start justify-between border-b border-[#EFECE6] pb-4">
+        <div>
+          <div class="text-[11px] font-medium uppercase tracking-widest text-[#8C8B85]">Trade-Off Simulator</div>
+          <h3 id="sim-title" class="text-base font-semibold text-[#111110] mt-0.5">SHP-402 Cost vs. Recovery</h3>
+        </div>
+        <button onclick="closeSimulator()" class="text-xs text-[#8C8B85] hover:text-[#111110]">Close</button>
+      </div>
+
+      <div class="space-y-3">
+        <div class="flex justify-between text-xs">
+          <span class="text-[#575653]">Incremental Expedite Allocation</span>
+          <span id="sim-cost" class="font-semibold text-[#111110] tabular">+$180</span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="300"
+          step="30"
+          value="180"
+          oninput="updateSim(this.value)"
+          class="w-full accent-[#0F52BA] cursor-pointer"
+        />
+        <div class="flex justify-between text-[11px] text-[#8C8B85] tabular">
+          <span>$0 (Hold Queue)</span>
+          <span>+$180 (Corridor B)</span>
+          <span>+$300 (Team Express)</span>
+        </div>
+      </div>
+
+      <div class="divide-y divide-[#EFECE6] border-y border-[#EFECE6] text-xs">
+        <div class="py-2.5 flex justify-between">
+          <span class="text-[#575653]">Delivery Deviation Recovered</span>
+          <span id="sim-hours" class="font-semibold text-[#15803D] tabular">2.0 hrs</span>
+        </div>
+        <div class="py-2.5 flex justify-between">
+          <span class="text-[#575653]">Projected Compartment Temp</span>
+          <span id="sim-temp" class="font-semibold text-[#111110] tabular">3.6°C (Safe)</span>
+        </div>
+        <div class="py-2.5 flex justify-between">
+          <span class="text-[#575653]">Net SLA &amp; Cargo Benefit</span>
+          <span id="sim-savings" class="font-semibold text-[#15803D] tabular">+$1,270</span>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <button onclick="closeSimulator()" class="px-4 py-2 rounded border border-[#D4D4CE] text-xs text-[#575653] hover:text-[#111110]">
+          Cancel
+        </button>
+        <button onclick="closeSimulator()" class="px-4 py-2 rounded bg-[#0F52BA] text-white text-xs font-medium">
+          Apply Route Allocation
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function setView(view) {
+      const views = ['briefing', 'allclear', 'loading', 'offline'];
+      views.forEach((v) => {
+        document.getElementById('view-' + v).classList.toggle('hidden', v !== view);
+        const tab = document.getElementById('tab-' + v);
+        if (v === view) {
+          tab.className = 'px-2.5 py-1 rounded bg-[#111110] text-white font-medium transition';
+        } else {
+          tab.className = 'px-2.5 py-1 rounded text-[#575653] hover:text-[#111110] transition';
+        }
+      });
+    }
+
+    function filterRows(category) {
+      const filters = ['all', 'cold', 'delay', 'dock'];
+      filters.forEach((f) => {
+        const btn = document.getElementById('filter-' + f);
+        if (f === category) {
+          btn.className = 'font-semibold text-[#111110] border-b-2 border-[#111110] pb-2';
+        } else {
+          btn.className = 'text-[#575653] hover:text-[#111110] pb-2 transition';
+        }
+      });
+
+      document.querySelectorAll('#view-briefing article').forEach((row) => {
+        if (row.dataset.resolved === 'true') return;
+        const match = category === 'all' || row.dataset.category === category;
+        row.classList.toggle('hidden', !match);
+      });
+    }
+
+    function resolveRow(id) {
+      const row = document.getElementById(id);
+      if (row) {
+        row.dataset.resolved = 'true';
+        row.classList.add('hidden');
+      }
+      const remaining = Array.from(document.querySelectorAll('#view-briefing article')).filter(
+        (r) => r.dataset.resolved !== 'true'
+      );
+      if (remaining.length === 0) {
+        setView('allclear');
+      }
+    }
+
+    function resetRows() {
+      document.querySelectorAll('#view-briefing article').forEach((r) => {
+        r.dataset.resolved = 'false';
+        r.classList.remove('hidden');
+      });
+      setView('briefing');
+    }
+
+    function askPreset(type) {
+      const box = document.getElementById('ai-answer-box');
+      const q = document.getElementById('ai-answer-question');
+      const text = document.getElementById('ai-answer-text');
+      box.classList.remove('hidden');
+
+      if (type === 'exposure') {
+        q.textContent = 'Executive Briefing • Financial Exposure & ROI';
+        text.innerHTML = 'Total active exposure across 48 loads is <strong class="tabular">$49,450</strong> (<span class="tabular">$48,000</span> biologics cargo on SHP-118 and <span class="tabular">$1,450</span> SLA penalty on SHP-402). Executing both recommended interventions requires <strong class="tabular">$300</strong> in incremental freight allocation and protects <strong class="tabular">$49,150</strong> net.';
+      } else if (type === 'coldchain') {
+        q.textContent = 'Executive Briefing • Cold-Chain Fleet Integrity';
+        text.innerHTML = '<strong class="tabular">47 of 48</strong> refrigerated units are operating within their <span class="tabular">1.8°C – 3.5°C</span> target band. Only <strong>SHP-118</strong> has drifted to <strong class="tabular">6.1°C</strong> on I-5 North; diverting to Cold-Dock Bay 2 (<span class="tabular">11 mi</span> ahead) prevents thermal spoilage.';
+      } else if (type === 'docks') {
+        q.textContent = 'Executive Briefing • Warehouse Dock Utilization';
+        text.innerHTML = 'Colton Distribution Center <strong>Dock B</strong> has zero available forklifts for incoming <strong>SHP-809</strong>. Reassigning arrival to <strong>Dock D</strong> (<span class="tabular">3</span> forklifts ready) and pairing it with the driver’s mandatory <span class="tabular">45m</span> rest stop eliminates unloading queue time at <strong class="tabular">$0</strong> additional cost.';
+      }
+    }
+
+    function runExecutiveAsk() {
+      const input = document.getElementById('exec-question-input').value.trim();
+      if (!input) return;
+      const box = document.getElementById('ai-answer-box');
+      document.getElementById('ai-answer-question').textContent = 'Query Response • "' + input + '"';
+      document.getElementById('ai-answer-text').innerHTML =
+        'Across 48 active Southern California shipments, <strong>SHP-118</strong> (<span class="tabular">$48,000</span> biologics load at <span class="tabular">6.1°C</span>) and <strong>SHP-402</strong> (<span class="tabular">2.5 hr</span> Port of Long Beach delay) represent 100% of your financial risk today. Approve both rows below to resolve for <span class="tabular">$300</span>.';
+      box.classList.remove('hidden');
+    }
+
+    function openDrawer(id) {
+      document.getElementById('drawer-title').textContent = 'SHP-' + id + ' Supporting Evidence';
+      document.getElementById('evidence-drawer').classList.remove('hidden');
+    }
+
+    function closeDrawer() {
+      document.getElementById('evidence-drawer').classList.add('hidden');
+    }
+
+    function openSimulator(label, cost) {
+      document.getElementById('sim-title').textContent = label + ' Cost vs. Recovery';
+      document.getElementById('simulator-modal').classList.remove('hidden');
+      updateSim(cost);
+    }
+
+    function closeSimulator() {
+      document.getElementById('simulator-modal').classList.add('hidden');
+    }
+
+    function updateSim(val) {
+      const cost = Number(val);
+      const hours = (cost / 90).toFixed(1);
+      const net = Math.max(0, Math.round(cost * 7.5 - cost));
+      document.getElementById('sim-cost').textContent = '+$' + cost;
+      document.getElementById('sim-hours').textContent = hours + ' hrs';
+      document.getElementById('sim-temp').textContent = cost >= 120 ? '3.6°C (Safe)' : '4.9°C (Drift)';
+      document.getElementById('sim-savings').textContent = '+$' + net.toLocaleString();
+    }
+  </script>
 </body>
 </html>
