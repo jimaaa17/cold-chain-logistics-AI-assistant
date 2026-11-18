@@ -1,0 +1,66 @@
+{
+  "$description": "FE/DESIGN.md as W3C Design Tokens (DTCG). Keep in lockstep with FE/DESIGN.md.",
+  "color": {
+    "$type": "color",
+    "canvas": { "$value": "#F7F7F5", "$description": "Warm architectural stone page background" },
+    "surface": {
+      "elevated": { "$value": "#FFFFFF", "$description": "Primary interactive surfaces only" },
+      "subtle": { "$value": "#F0F0EC", "$description": "Subtle surface and hover" }
+    },
+    "border": {
+      "outer": { "$value": "#E6E6E2", "$description": "Outer container hairline" },
+      "divider": { "$value": "#EFECE6", "$description": "Internal row divider" }
+    },
+    "ink": {
+      "primary": { "$value": "#111110" },
+      "secondary": { "$value": "#575653" },
+      "muted": { "$value": "#8C8B85" }
+    },
+    "accent": {
+      "action": { "$value": "#0F52BA", "$description": "Primary decision CTAs and focus states only" }
+    },
+    "signal": {
+      "critical": { "$value": "#C81E1E", "$description": "Dot + text only" },
+      "warning": { "$value": "#B45309", "$description": "Dot + text only" },
+      "healthy": { "$value": "#15803D", "$description": "Dot + text only" }
+    }
+  },
+  "font": {
+    "family": {
+      "$type": "fontFamily",
+      "sans": { "$value": ["Inter", "-apple-system", "BlinkMacSystemFont", "sans-serif"] },
+      "mono": { "$value": ["JetBrains Mono", "ui-monospace", "monospace"] }
+    },
+    "letterSpacing": {
+      "$type": "dimension",
+      "heading": { "$value": "-0.015em" }
+    }
+  },
+  "space": {
+    "$type": "dimension",
+    "1": { "$value": "4px" },
+    "2": { "$value": "8px" },
+    "3": { "$value": "12px" },
+    "4": { "$value": "16px" },
+    "6": { "$value": "24px" },
+    "8": { "$value": "32px" },
+    "12": { "$value": "48px" }
+  },
+  "radius": {
+    "$type": "dimension",
+    "control": { "$value": "6px" },
+    "card": { "$value": "8px" }
+  },
+  "size": {
+    "$type": "dimension",
+    "icon": { "sm": { "$value": "16px" }, "md": { "$value": "18px" } },
+    "iconStroke": { "$value": "1.5px" },
+    "statusDot": { "$value": "6px" }
+  },
+  "shadow": {
+    "$type": "shadow",
+    "hairline": {
+      "$value": { "color": "#00000008", "offsetX": "0px", "offsetY": "1px", "blur": "2px", "spread": "0px" }
+    }
+  }
+}
