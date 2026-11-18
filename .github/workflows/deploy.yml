@@ -45,7 +45,7 @@ jobs:
       - name: Install, Test, and Build Frontend (FE/)
         working-directory: FE
         run: |
-          npm install
+          npm ci
           npm test
           npm run build
 
