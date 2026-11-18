@@ -48,8 +48,10 @@ export function useDispatchStream(sessionId) {
           signal: controller.signal,
           onEvent: ({ type, data }) => {
             setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== assistantMsgId) return m;
+              prev.map((current) => {
+                if (current.id !== assistantMsgId) return current;
+                // Sticky: once any frame is simulated (AGENT_OFFLINE_DEMO), the whole reply is.
+                const m = data?.simulated ? { ...current, simulated: true } : current;
 
                 if (type === "status") {
                   setActiveStatus(data.label);
@@ -72,6 +74,7 @@ export function useDispatchStream(sessionId) {
                       ...m.traces,
                       {
                         type: "tool_input",
+                        simulated: Boolean(data.simulated),
                         node: data.node || "reasoner",
                         name: data.name,
                         args: data.args,
@@ -95,6 +98,7 @@ export function useDispatchStream(sessionId) {
                       ...m.traces,
                       {
                         type: "tool_output",
+                        simulated: Boolean(data.simulated),
                         node: data.node || "tools",
                         name: data.name,
                         content: data.content,
