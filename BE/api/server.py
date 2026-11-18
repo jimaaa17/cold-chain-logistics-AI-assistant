@@ -520,6 +520,37 @@ def default_agent_streamer(session_id: str, prompt: str) -> Iterable[dict[str, A
                         }
 
 
+def default_session_purger(session_id: str) -> bool:
+    """Deletes the conversation memory (LangGraph checkpoint) for `session_id` in this process.
+
+    Returns True when no memory for that session remains afterwards. The checkpointer is the
+    in-process MemorySaver, so with several workers each holds its own copy (see onboarding Q4).
+    """
+    graph = _ACTIVE_GRAPH
+    if graph is None:  # graph never built in this process, so it holds no memory to delete
+        return True
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is None or not hasattr(checkpointer, "delete_thread"):
+        logger.warning("Session purge: checkpointer cannot delete threads; memory for the session is kept.")
+        return False
+    checkpointer.delete_thread(session_id)
+    return True
+
+
+def build_purge_payload(
+    old_session_id: Optional[str], purger: Callable[[str], bool] = default_session_purger
+) -> dict[str, Any]:
+    """`/api/v1/session/purge` for both servers: clears the old thread's memory, mints a new id."""
+    purged = True
+    if old_session_id:
+        try:
+            purged = bool(purger(old_session_id))
+        except Exception as exc:
+            logger.warning("Session purge failed: %s", _describe_config_error(exc))
+            purged = False
+    return {"purged": purged, "previous_session_id": old_session_id, "session_id": str(uuid.uuid4())}
+
+
 META_CAPABILITIES = {
     "telemetry_db": ["past_history", "present_snapshot", "future_risk_predictions"],
     "weather_corridor": ["past_days", "current_weather", "forecast_days"],
@@ -570,6 +601,7 @@ def create_app(
     agent_streamer: Optional[Callable[[str, str], Iterable[dict[str, Any]]]] = None,
     audit_writer: Optional[Callable[[str, str, str, str], None]] = None,
     audit_reader: Optional[Callable[..., list[dict[str, Any]]]] = None,
+    session_purger: Optional[Callable[[str], bool]] = None,
 ):
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, HTTPException
@@ -594,6 +626,7 @@ def create_app(
     streamer_fn = agent_streamer or default_agent_streamer
     writer_fn = audit_writer or default_audit_writer
     reader_fn = audit_reader or default_audit_reader
+    purger_fn = session_purger or default_session_purger
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -645,11 +678,7 @@ def create_app(
 
     @app.post("/api/v1/session/purge")
     def purge_session(req: SessionPurgeRequest):
-        return {
-            "purged": True,
-            "previous_session_id": req.old_session_id,
-            "session_id": str(uuid.uuid4()),
-        }
+        return build_purge_payload(req.old_session_id, purger_fn)
 
     @app.post("/api/v1/dispatch/stream")
     def stream_dispatch(req: DispatchStreamRequest):
@@ -763,14 +792,7 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
             body = self._read_json()
 
             if parsed.path == "/api/v1/session/purge":
-                return self._send_json(
-                    200,
-                    {
-                        "purged": True,
-                        "previous_session_id": body.get("old_session_id"),
-                        "session_id": str(uuid.uuid4()),
-                    },
-                )
+                return self._send_json(200, build_purge_payload(body.get("old_session_id")))
 
             if parsed.path == "/api/v1/dispatch/stream":
                 session_id = str(body.get("session_id") or "default-session")

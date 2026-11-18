@@ -472,6 +472,107 @@ class TestMetaAndDemoDrift(unittest.TestCase):
         self.assertIn("Current_Temperature_C", sql)
 
 
+class TestSessionPurge(unittest.TestCase):
+    """F6: /session/purge deletes the old thread's LangGraph checkpoint, not just mint a new id."""
+
+    def setUp(self):
+        from unittest import mock
+
+        try:
+            from langgraph.checkpoint.memory import MemorySaver  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("langgraph not installed")
+        import api.server as server
+
+        self.server, self.mock = server, mock
+        mock.patch.object(server, "_ACTIVE_GRAPH", None).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _graph_with_memory(self, *session_ids):
+        from langchain_core.messages import AIMessage
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.graph import END, START, MessagesState, StateGraph
+
+        builder = StateGraph(MessagesState)
+        builder.add_node("reply", lambda state: {"messages": [AIMessage(content="ack")]})
+        builder.add_edge(START, "reply")
+        builder.add_edge("reply", END)
+        graph = builder.compile(checkpointer=MemorySaver())
+        for sid in session_ids:
+            graph.invoke({"messages": [("user", f"hello from {sid}")]}, {"configurable": {"thread_id": sid}})
+        return graph
+
+    @staticmethod
+    def _has_memory(graph, session_id):
+        return graph.checkpointer.get_tuple({"configurable": {"thread_id": session_id}}) is not None
+
+    def test_purge_deletes_only_the_old_sessions_memory(self):
+        graph = self._graph_with_memory("old-123", "other-456")
+        self.server._ACTIVE_GRAPH = graph
+        self.assertTrue(self._has_memory(graph, "old-123"))
+
+        body = self.server.build_purge_payload("old-123")
+
+        self.assertTrue(body["purged"])
+        self.assertEqual(body["previous_session_id"], "old-123")
+        self.assertNotEqual(body["session_id"], "old-123")
+        self.assertFalse(self._has_memory(graph, "old-123"))
+        self.assertTrue(self._has_memory(graph, "other-456"))
+
+    def test_purge_before_graph_is_built_is_a_no_op_success(self):
+        self.assertTrue(self.server.build_purge_payload("never-used")["purged"])
+
+    def test_purge_without_old_session_does_not_call_purger(self):
+        purger = self.mock.Mock()
+        body = self.server.build_purge_payload(None, purger)
+        purger.assert_not_called()
+        self.assertTrue(body["purged"])
+
+    def test_failed_purge_reports_false_but_still_rotates_session(self):
+        with self.assertLogs("api.server", level="WARNING"):
+            body = self.server.build_purge_payload("old-1", self.mock.Mock(side_effect=RuntimeError("boom")))
+        self.assertFalse(body["purged"])
+        self.assertTrue(body["session_id"])
+
+    def test_checkpointer_without_delete_reports_false(self):
+        self.server._ACTIVE_GRAPH = self.mock.Mock(checkpointer=object())
+        with self.assertLogs("api.server", level="WARNING"):
+            self.assertFalse(self.server.build_purge_payload("old-1")["purged"])
+
+    @unittest.skipIf(TestClient is None, "fastapi not installed")
+    def test_endpoint_uses_injected_purger(self):
+        from api.server import create_app
+
+        calls = []
+        client = TestClient(create_app(agent_streamer=lambda s, p: iter([]), session_purger=lambda sid: calls.append(sid) or True))
+        body = client.post("/api/v1/session/purge", json={"old_session_id": "old-9"}).json()
+        self.assertEqual(calls, ["old-9"])
+        self.assertTrue(body["purged"])
+
+    def test_stdlib_endpoint_purges_too(self):
+        import threading
+        import urllib.request
+
+        graph = self._graph_with_memory("old-std")
+        self.server._ACTIVE_GRAPH = graph
+        server = self.server.make_stdlib_server("127.0.0.1", 0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_address[1]}/api/v1/session/purge",
+                data=json.dumps({"old_session_id": "old-std"}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as res:
+                body = json.loads(res.read())
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertTrue(body["purged"])
+        self.assertFalse(self._has_memory(graph, "old-std"))
+
+
 @unittest.skipIf(TestClient is None, "fastapi not installed")
 class TestFeBffApi(unittest.TestCase):
     def setUp(self):
