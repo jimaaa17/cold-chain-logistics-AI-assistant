@@ -59,7 +59,7 @@ python -m legacy_ingest [--dry-run] [--mode refresh|upsert] [--csv PATH] [--forc
 
 `docs/instructions.md` covers starting the MSSQL container (`mcr.microsoft.com/mssql/server:2022-latest` in Docker, locally or on EC2), checking the load (expected 32,065 rows) and the systemd setup. After loading, run `BE/sql/setup_security_view.sql` as admin to create the view, the RO login and the audit table.
 
-**CI/CD** (`.github/workflows/deploy.yml`): on push/PR to `main` it runs the backend unittest suite, then `npm install && npm test && npm run build` in `FE/`. Deployment to EC2 over SSH runs only on manual `workflow_dispatch`: it does a git pull, installs deps, builds FE, and restarts the `fde-api` and `streamlit` systemd units.
+**CI/CD** (`.github/workflows/deploy.yml`): on push/PR to `main` it runs the backend unittest suite, then `npm ci && npm test && npm run build` in `FE/`. **Merging to `main` deploys:** every push to `main` whose checks pass (and a manual `workflow_dispatch` run on `main`) deploys to EC2 over SSH, using the `FDE-YT-Cold` environment unless the manual run names another. It does a git pull, installs deps, builds FE, and restarts the `fde-api` and `streamlit` systemd units. The script stops at the first failed command (`set -e`), except that a failed restart is ignored (`|| true`), so a green run doesn't prove the services came back. A restart drops in-memory sessions, including pending approvals.
 
 ## Data & security model
 
