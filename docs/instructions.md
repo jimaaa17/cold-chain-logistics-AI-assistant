@@ -235,3 +235,45 @@ curl -s localhost:8000/readyz      # the agent builds and the telemetry database
 ```
 - The server needs Node 20 with `npm`, and `.env` in the project folder.
 - The API listens on 127.0.0.1 only because it has no login. From a laptop: `ssh -L 8000:localhost:8000 ubuntu@<EC2 host>`
+
+
+## Phase 7: Private frontend on Vercel
+
+Vercel serves the React app behind a login and forwards `/api/*` to the API server with a secret header.
+
+There are two EC2 instances in us-east-2. Don't mix them up:
+
+| Instance | Runs | Public inbound ports |
+|---|---|---|
+| API server (Elastic IP, Ubuntu) | `fde-api`, Caddy | 22, 80, 443 (never 8000) |
+| SQL server | SQL Server in Docker | 1433, only from the API server's Elastic IP and your own IP |
+
+Port 22 on the API server must stay reachable, because GitHub Actions deploys over SSH from changing addresses. Use key-only login. If the API server's public IP changes, update the `EC2_HOST` secret (GitHub environment `FDE-YT-Cold`), the DuckDNS record and the SQL server's 1433 rule.
+
+Do the steps in this order.
+
+1. DNS: point `coldchain-dispatch-api.duckdns.org` at the API server's Elastic IP. Check with `dig +short coldchain-dispatch-api.duckdns.org @1.1.1.1`. Vercel sends the secret to whoever controls that name. To use another host, change it in `FE/vercel.json` and `deploy/Caddyfile`.
+2. Merge to `main`, so the API that checks the secret is deployed.
+3. Create the secret with `openssl rand -hex 32`. On the API server, add it to `.env`, then restart the API.
+```
+API_ORIGIN_SECRET=<the secret>
+AUDIT_LOGIN_ENABLED=false
+```
+```
+sudo systemctl restart fde-api
+```
+4. API server: install Caddy (https://caddyserver.com/docs/install), open 80 and 443 in its security group, then load the config. This replaces the server's Caddyfile. Caddy gets the HTTPS certificate itself.
+```
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+curl -s -o /dev/null -w '%{http_code}\n' https://coldchain-dispatch-api.duckdns.org/api/v1/meta    # expect 401
+```
+5. Vercel, in this order, so the app is never public with a working API:
+   - Import the repo with Root Directory `FE` and deploy it without the secret.
+   - Settings > Deployment Protection: turn on Vercel Authentication for All Deployments. Standard Protection leaves the production domain open.
+   - Settings > Environment Variables: add `ORIGIN_SECRET` (the same secret) for Production only, so preview builds can't reach the API.
+   - Redeploy the latest production deployment.
+6. Check in a private window that the Vercel URL asks for a login. Then sign in, ask a question, and check that the answer streams and that a long run isn't cut off (Vercel limits proxied requests to 120 seconds).
+
+- With the secret set, the console over an SSH tunnel no longer works, because the browser doesn't send the header.
+- The Vercel app and the API deploy separately from the same merge, so they can be out of step for a few minutes.

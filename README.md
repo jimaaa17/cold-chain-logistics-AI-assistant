@@ -273,8 +273,9 @@ _Demonstration on historical data with the widened window._
 * Reading the audit log requires the administrator's SQL credentials.
 * Keys and passwords stay on the server. The browser holds no LLM or database keys.
 
-> **The API has no authentication.** Anyone who can reach it can ask questions and approve actions, and
-> the approver's name is whatever the client sends. Keep it on localhost or behind an authenticated proxy.
+> **The API has no user login.** Anyone who can reach it can ask questions and approve actions, and
+> the approver's name is whatever the client sends. Keep it on localhost, or set `API_ORIGIN_SECRET` and
+> put a login in front of it, as in [Phase 7 of the setup notes](docs/instructions.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
