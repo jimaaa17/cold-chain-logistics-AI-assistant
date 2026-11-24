@@ -529,6 +529,25 @@ def default_approval_streamer(session_id: str, decision: dict[str, str]) -> Iter
     yield from iter_dispatch_events(graph, session_id=session_id, resume=decision)
 
 
+def build_readiness() -> tuple[int, dict[str, str]]:
+    """`/readyz` for both servers: can the agent be built and the telemetry view be read?
+    Reports error types only, because the endpoint has no login. Never raises."""
+    try:
+        resources = _get_compiled_graph().dispatch_resources
+    except Exception as exc:
+        logger.warning("Not ready: %s", _describe_config_error(exc))
+        return 503, {"status": "not_ready", "agent": type(exc).__name__}
+    try:
+        from agent.tools.telemetry_sql import fetch_telemetry_rows
+
+        view = resources.settings.sql_allowed_view
+        fetch_telemetry_rows(resources.engine(), f"SELECT TOP 1 * FROM {view}", max_rows=1)
+    except Exception as exc:
+        logger.warning("Not ready: telemetry database: %s", type(exc).__name__)
+        return 503, {"status": "not_ready", "telemetry_db": type(exc).__name__}
+    return 200, {"status": "ready", "telemetry_db": "ok"}
+
+
 def prewarm_agent() -> dict[str, str]:
     """Builds the workflow and loads models/clients before the first request. Never raises."""
     if not _env_flag("AGENT_PREWARM", default=True):
@@ -640,7 +659,7 @@ def create_app(
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from pydantic import BaseModel, Field
 
     class DispatchStreamRequest(BaseModel):
@@ -699,6 +718,11 @@ def create_app(
     @app.get("/healthz")
     def healthz():
         return {"status": "ok", "service": "fde-dispatch-bff"}
+
+    @app.get("/readyz")
+    def readyz():
+        status_code, payload = build_readiness()
+        return JSONResponse(payload, status_code=status_code)
 
     @app.get("/api/v1/meta")
     def get_meta():
@@ -820,6 +844,8 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
             parsed = urlparse(self.path)
             if parsed.path == "/healthz":
                 return self._send_json(200, {"status": "ok", "service": "fde-dispatch-bff"})
+            if parsed.path == "/readyz":
+                return self._send_json(*build_readiness())
             if parsed.path == "/api/v1/meta":
                 return self._send_json(200, build_meta_payload())
             if parsed.path == "/api/v1/traces":
