@@ -1,6 +1,6 @@
 # Plan: split `BE/agent/workflow.py` into a layered `agent/dispatch/` package
 
-Status: Phases 0–3 and 5 done on `refactor/dispatch-package`. Phase 4: LLM factory move (`35ef48c`) and prompt templates Step 1 (`b26bc39`) and Step 2 (`b8561ad`) done; gather helper and retry policies not started (see the notes on each). Reference design: Gen AI `BE/app/agents/rag_agent/`
+Status: Phases 0–3 and 5 done on `refactor/dispatch-package`. Phase 4: LLM factory move (`35ef48c`) and prompt templates Step 1 (`b26bc39`) and Step 2 (`b8561ad`) done; gather helper and retry policies not started (see the notes on each). Phase 6 (one failure policy) and Phase 7 (model routing, thresholds and verification within coded guardrails; all modes default to `code`) done, with the changes listed under each. Reference design: Gen AI `BE/app/agents/rag_agent/`
 (topology-only `graph.py`, one module per node, dependencies through `Runtime[ContextSchema]`,
 public input/output schemas).
 
@@ -15,8 +15,8 @@ closures inside `build_dispatch_workflow`, capturing `cfg`, `res`, `now_fn` and 
 - the graph's public contract (what callers send in and get out) is the whole internal state.
 
 What stays as it is, because it is already better than the reference: lazy, thread-safe
-`DispatchResources` with `warm()`, no import-time side effects, rules and verification in plain code,
-the verifier retry loop and the `interrupt()` approval gate.
+`DispatchResources` with `warm()`, no import-time side effects, the verifier retry loop and the `interrupt()` approval gate. (Phase 7 lets
+a model take part in routing, thresholds and verification; the code versions stay as the default, floor and fallback.)
 
 ## Constraints (things that must not break)
 
@@ -171,7 +171,7 @@ internal field, and `pending_approval` reads `snapshot.tasks`, not values, so ca
   | Pydantic model + `with_structured_output(..., method="json_mode", include_raw=True)` + safe default on error | Not now | The planner already returns typed tool calls through `bind_tools`, and the reasoner must return Markdown with `ACTION[...]` tags for the verifier. Use this pattern only if an LLM step ever has to return a fixed shape |
   | `_config = Config()` at import time, to read `n_messages` | No | Settings reach prompts as variables at render time, never at import |
   | `<critical_requirements>` asks for a confidence score that `IntentClassification` has no field for | No | Every instruction must match the output the node actually parses |
-  | Intent decided by an LLM | No | Cold-chain routes in code (`agent/intent.py`, regex + gazetteer), which is faster, free and testable. Keep it |
+  | Intent decided by an LLM | No | Cold-chain routes in code (`agent/intent.py`, regex + gazetteer), which is faster, free and testable. Keep it; Phase 7 adds an opt-in model only for questions code can't place |
 
   **Step 1: port as-is (no prompt wording change)**. *Done in `b26bc39`; messages captured before and after across four scenarios were byte-identical.*
 
@@ -413,7 +413,7 @@ internal field, and `pending_approval` reads `snapshot.tasks`, not values, so ca
   and `build_default_tools` from `agent/graph.py` (the old ReAct agent). Move them to `agent/llm.py`;
   the old graph imports from there. Add a small `LLMTask` table (`PLANNER`, `REASONER`) only once
   the two need different models or temperatures.
-- **Retry policies on the LLM nodes.** `planner` and `reasoner` currently fail the turn on a transient
+- **Retry policies on the LLM nodes.** *(Superseded by Phase 6, which adopts the transient-only `retry_on` below.)* `planner` and `reasoner` currently fail the turn on a transient
   provider error. `add_node("reasoner", reasoner, retry_policy=RetryPolicy(max_attempts=2))` is the
   reference's approach. This changes behaviour (latency on failure), so decide explicitly.
   *Review: don't use the default `retry_on`.* LangGraph 1.2.11's `default_retry_on` retries every
@@ -428,12 +428,212 @@ internal field, and `pending_approval` reads `snapshot.tasks`, not values, so ca
 - `BE/AGENTS.md` §1: add the boundary rule, "dispatch nodes get the LLM, engine, HTTP and retrieval
   from `runtime.context`, never by building or importing clients themselves".
 
+### Phase 6: one failure policy for data gathering and model steps
+
+Goal: no single failing source or model call ends a turn. Every failure becomes a recorded **gap**,
+the step falls back to a known-safe behaviour, and the operator sees which part was degraded.
+This comes before Phase 7, because Phase 7's code fallbacks are exactly what this phase wires in.
+
+*Done. What differs from the text below:*
+- The transient retry is inside `run_model_step`. A node `RetryPolicy` never sees an exception the step has handled.
+- `degraded` is its own audited event type; `status` events are not audited. Data-source outages emit it too.
+- `gaps` has an append reducer. The ledger used to overwrite gaps recorded before it.
+- Clients and prompts are built outside the wrapper, so a missing API key is still an error frame.
+- The evidence-only answer skips the verifier and its retry, and sends `draft_start` again to clear streamed text.
+- Not built: the optional second model for content filtering.
+
+**The contract (same for every step)**
+
+| Outcome | What the step returns | Visible to |
+|---|---|---|
+| Success | its normal output | — |
+| Empty but valid ("no rows", "no SOP match") | its normal output, marked `status: "empty"` | ledger note, not a gap |
+| Invalid input (bad SQL, missing coordinates, unknown tool) | `status: "error"`, no data | gap: `"<step>: <reason>"` |
+| Dependency down (DB, weather API, Pinecone, model provider) | `status: "error"`, no data, or the step's fallback output | gap + `degraded` event |
+
+- `gathered` items get a `status: "ok" | "empty" | "error"` field. `ledger` turns only `error` into a gap.
+  Today an empty SOP search is a gap while empty telemetry isn't; this makes them consistent.
+- One `gaps: list[str]` stays the single list, prefixed by step (`"telemetry: ..."`, `"router: ..."`),
+  so the reasoner's `<data_gaps>` block and the final footer cover both data and model failures.
+- New event `{"type": "status", "phase": "degraded", "step": "...", "fallback": "...", "reason": "..."}`
+  in `events.py`. The FE (`dispatchEvents.js`) and `api/server.py` audit must handle it, since events are a three-way contract.
+
+**Data gathering (tighten what exists)**
+
+- `gather_weather`: missing or out-of-range `latitude`/`longitude` becomes the gap
+  `"weather: no valid coordinates"`. Today it silently fetches 0.0, 0.0.
+- `route_after_planner`: an unknown tool name becomes a gap (`"planner: unknown tool X"`) instead of being dropped.
+- Error text stays type-only (`TimeoutError`, `OperationalError`), never the raw exception, which can
+  contain connection details.
+
+**Model steps (new)**
+
+A small helper in `dispatch/resilience.py` wraps every model call:
+
+```python
+def run_model_step(step: str, call: Callable[[], T], fallback: Callable[[], T], *,
+                   emit: Callable[[dict], None], fallback_name: str) -> tuple[T, list[str]]:
+    """Runs `call`; on any model failure returns (fallback(), [gap]) and emits a `degraded` event."""
+```
+
+- **Transient** failures (429, 5xx, timeouts) are retried once with LangGraph's
+  `RetryPolicy(max_attempts=2, retry_on=is_transient)`, reusing `rag.core.resilience`'s check. This
+  replaces the Phase 4 "retry policies" item.
+- **Permanent** failures (auth, quota, invalid request), **unparseable structured output**
+  (`OutputParserException`, pydantic `ValidationError`) and **empty or content-filtered replies** go
+  straight to the fallback, with no retry.
+- Optional, as in Gen AI's `get_fallback_llm`: try a second model (an `LLMTask` fallback entry) before
+  the code fallback, for content filtering.
+
+| Model step | Fallback when it fails | Gap text |
+|---|---|---|
+| `route` (Phase 7) | `agent/intent.py` `classify_intent` (today's code router) | `router: model unavailable, routed by keyword rules` |
+| `planner` | Code plan: the incident-scan SQL if the intent has an area or temperature filter, plus SOP search with the question | `planner: model unavailable, used the standard scan` |
+| `assess` (Phase 7) | `agent/rules.py` `evaluate_rules` (today's coded thresholds) | `assessment: model unavailable, used coded SOP thresholds` |
+| `reasoner` | A deterministic answer: the ledger as a table, the triggers and the gaps. No `ACTION` lines, so nothing goes to approval. Marked unverified | `answer: model unavailable, showing evidence only` |
+| `judge` (Phase 7) | `agent/verifier.py` `verify_draft` (today's code verifier) | `verification: model unavailable, checked by code rules` |
+
+**Tests**
+- Each model step with a fake LLM that raises: transient error (retried once), permanent error,
+  invalid structured output, empty reply. Assert fallback output, gap text and `degraded` event.
+- A whole-graph run where every model call fails still ends in `final_answer`, with the gaps listed and no approval request.
+- `gather_weather` without coordinates; planner with an unknown tool; empty vs failed SOP search.
+
+### Phase 7: the model takes the call on routing, thresholds and verification
+
+Decision: wherever it's safe, the model decides and code checks its work, rather than code deciding
+and the model explaining. Today's code paths (`intent.py`, `rules.py`, `verifier.py`) stay, as the
+Phase 6 fallbacks and as cheap guardrails.
+
+*Done. What differs from the text below:*
+- All modes default to `code`, not `shadow`: shadow pays for both paths on every request.
+- Routing asks the model only when code says `open` or `clarify`; the standard scan keeps its latency.
+- The coded rules are a floor. The model can add findings only for a (field, direction) they don't cover,
+  code does the comparison, the quote must be in the cited excerpt, and added findings carry no actions.
+  Checking actions against `ACTION_LABELS` would have let through `divert_emergency_cold_storage` and `write_off`.
+- `Finding` has no `observed`, `breached` or `actions`: code reads the ledger and decides those.
+- The judge runs only on drafts the code checks passed and can only add problems. The node is still `verifier`.
+- Disagreements are an audited `model_decision` event.
+- "No extra waiting" for `assess` was wrong: the reasoner needs its triggers. Each mode adds one sequential call.
+- Evals on the configured model: 26 of 27. The miss (a reading below 0 °C) is kept by the coded floor.
+  Other providers have not been run.
+
+**What changes and what stays in code**
+
+| Decision | Today (code) | After (model) | Code guardrail that stays, and why |
+|---|---|---|---|
+| Routing | `intent.py` regex + gazetteer | `route` node: model classifies the question and extracts place and filters (structured output) | Named places resolve to coordinates through `GAZETTEER` (models invent coordinates). Coordinates must be in range |
+| Thresholds | `rules.py`: 4.0 °C, 0.0 °C, 7.0, 0.65 hard-coded | `assess` node: model reads the SOP excerpts in the ledger and decides which readings breach which SOP section and which actions apply | Action ids must be in `ACTION_LABELS`. Actions only on **fresh** evidence (freshness is timestamp maths in `evidence.py`). The quoted reading must equal the ledger value |
+| Verification | `verifier.py`: number matching, citations, wording, coverage | `judge` node: model checks the draft against the ledger and returns pass/fail with problems | Cited ids must exist. `ACTION` tags must match the assessment's permitted actions. High-stakes actions always go to `interrupt()` |
+| SQL safety | `validate_readonly_select` + read-only role | unchanged | Never a model call: it guards the database |
+| Approval | `interrupt()` for `HIGH_STAKES_ACTIONS` | unchanged | Never a model call: it moves or destroys freight |
+
+The guardrails are deliberately narrow. Each is a lookup or an equality check that can't be wrong, and
+each protects something a model mistake would make costly: the database, freight, or a fabricated reading.
+
+**New flow**
+
+```
+intake ─ route (model) ─┬─ clarify ───────────────────────────────────────────────┐
+                        ├─ gather_* (Send) ─┐                                       │
+                        └─ planner ─────────┴─ ledger ─ assess (model) ─ reasoner ─ judge (model) ─┬─ action_gate ─ finalize
+                                                                          ▲                         │
+                                                                          └──── retry once ─────────┘
+```
+
+`intake` keeps resetting per-turn fields. `route_after_intake` becomes `route_after_route`, reading the
+model's decision. `rules` is replaced by `assess`, and `verifier` by `judge`.
+
+**Structured outputs** (`dispatch/schemas.py`, pydantic, used with `llm.with_structured_output(...)`)
+
+```python
+class RouteDecision(BaseModel):
+    kind: Literal["incident_scan", "sop_lookup", "open", "clarify"]
+    reasoning: str                      # one or two sentences, logged and audited
+    place: str | None = None            # resolved through GAZETTEER when known
+    latitude: float | None = None       # only if the user gave coordinates
+    longitude: float | None = None
+    min_temp_c: float | None = None
+    max_temp_c: float | None = None
+
+class Finding(BaseModel):
+    evidence: str                       # "T3"
+    sop_evidence: str                   # "S2", the excerpt that states the threshold
+    sop_section: str                    # "§1 Critical Breach"
+    field: str                          # "Current_Temperature_C"
+    observed: float                     # must equal the ledger value (guardrail)
+    threshold_quoted: str               # the SOP's own words, e.g. "> 4.0 °C"
+    breached: bool
+    actions: list[str] = []             # ids from ACTION_LABELS (guardrail)
+
+class Assessment(BaseModel):
+    findings: list[Finding]
+    reasoning: str
+
+class Verdict(BaseModel):
+    passed: bool
+    problems: list[str]                 # fed back to the reasoner on the retry, as today
+```
+
+After the guardrails run, `assess` produces the same `triggers` / `historical` lists the reasoner,
+`render_ledger` and `action_gate` already use, so those don't change. Findings on non-fresh evidence
+go to `historical` whatever the model said; findings that fail a guardrail are dropped and recorded as
+a gap (`"assessment: T3 observed 7.2 ≠ ledger 6.8"`).
+
+**Prompts** (`dispatch/prompts/{router,assessor,judge}.py`), written in the `intent.py` style used for
+the planner and reasoner: `<system_context>`, ordered `<rules>`, `<output_format>`, `<examples>`,
+`<critical_requirements>`, with settings passed as variables at render time.
+- `router`: the four routes in priority order, the gazetteer place names, and examples taken from
+  today's `intent.py` tests, so the eval cases already exist.
+- `assessor`: "use only thresholds stated in the SOP excerpts and cite the excerpt; if no excerpt
+  states a threshold for a field, don't assess it". A missing SOP section is reported as a gap, not
+  filled from memory.
+- `judge`: today's five verifier checks, written as rules for the model. The code number-matcher's
+  unmatched numbers are passed in as hints (`<unmatched_numbers>`), so the model makes the call on
+  rounding and aggregated values instead of the regex.
+
+**Models.** This adds up to three model calls per turn (route, assess, judge; incident scans make one
+call today). Now is the time for the `LLMTask` table from Phase 4: `ROUTER` and `JUDGE` on a fast,
+cheap model at temperature 0; `ASSESS` and `REASONER` on the main model. `JUDGE` should differ from
+`REASONER`, so the checker doesn't share the writer's blind spots. Run `assess` and the reasoner's
+prompt build with no extra waiting: `assess` only needs the ledger.
+
+**Rollout, one decision at a time, behind settings**
+
+```python
+routing_mode: Literal["code", "shadow", "model"] = "shadow"
+thresholds_mode: Literal["code", "shadow", "model"] = "shadow"
+verification_mode: Literal["code", "shadow", "model"] = "shadow"
+```
+
+- `shadow`: run both, use the **code** result, and record disagreements as a `status` event and in
+  the audit log and Langfuse.
+- Switch a setting to `model` once its disagreement rate on the eval set and in shadow logs is
+  acceptable. Order: routing first (lowest risk), then verification, then thresholds.
+- `code` keeps today's behaviour exactly. It's also the fallback in every mode (Phase 6).
+
+**Evals** (`tests/evals/dispatch_cases.py`, run on demand against a real model, not in CI):
+20–30 questions with expected route, triggers, permitted actions and pass/fail verdicts. Start from
+the questions in `test_dispatch_workflow.py`, `test_dispatch_nodes.py` and the `intent.py` tests, and
+add hard cases: a historical-only breach, mixed fresh and historical readings, an SOP that doesn't
+mention a field, an aggregate answer, a reading exactly at a threshold.
+
+**Offline tests** (fake LLMs returning fixed structured outputs):
+- each guardrail: invented coordinates replaced by the gazetteer, an action outside the catalog, an
+  action on historical evidence, an `observed` value that doesn't match the ledger, a cited id that
+  doesn't exist;
+- shadow mode uses the code result and emits a disagreement event;
+- `model` mode with the model failing falls back exactly as Phase 6 says.
+
+**Docs.** The "who decides what" text changes in `dispatch/graph.py`'s docstring, `CLAUDE.md` and
+`BE/AGENTS.md`: "the model routes, assesses SOP thresholds, writes and checks the answer; code
+computes freshness, guards SQL and actions, and a dispatcher approves high-stakes actions".
+
 ## Not copying from the reference
 
 - Building every client at startup in `main.py` (cold-chain's lazy `DispatchResources` + `warm()` is better).
 - `Any`-typed context fields: `DispatchContext` is fully typed.
 - Prompt modules that read config at import time (`intent.py`'s `_config = Config()`).
-- An LLM for intent routing: `agent/intent.py` stays deterministic.
 - Routing on string literals when an enum exists: keep using `Intent.kind` values from `intent.py`.
 
 ## Out of scope (separate follow-up)
