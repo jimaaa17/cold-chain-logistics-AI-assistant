@@ -18,7 +18,7 @@ from agent.dispatch.consult import consult, emit_decision
 from agent.dispatch.context import DispatchContext
 from agent.dispatch.schemas import Assessment, Finding
 from agent.dispatch.state import DispatchState
-from agent.evidence import FRESH, fmt_value, render_ledger
+from agent.evidence import AGGREGATED, FRESH, fmt_value, render_ledger
 from agent.llm import LLMTask
 from agent.rules import PORTS_LB_LA_BOX, RULES, evaluate_rules
 
@@ -44,8 +44,8 @@ def check_finding(f: Finding, by_id: dict[str, dict], coded: set[tuple]) -> tupl
     """(trigger to add, None), (None, reason it was rejected), or (None, None) for one the rules already found."""
     rec, sop = by_id.get(f.evidence), by_id.get(f.sop_evidence)
     direction = f.operator[0]
-    if rec is None or rec["source"] != "telemetry" or sop is None or sop["source"] != "sop":
-        return None, f"{f.evidence}/{f.sop_evidence} is not a telemetry record with an SOP excerpt"
+    if rec is None or rec["source"] != "telemetry" or rec["freshness"] == AGGREGATED or sop is None or sop["source"] != "sop":
+        return None, f"{f.evidence}/{f.sop_evidence} is not an individual telemetry reading with an SOP excerpt"
     if (f.evidence, f.field, direction) in coded:
         return None, None
     if (f.field, direction) in _CODED:
@@ -86,7 +86,7 @@ def assess(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
             "type": "evidence",
             "records": len(records),
             "fresh": sum(1 for r in records if r["freshness"] == FRESH),
-            "historical": sum(1 for r in records if r["source"] == "telemetry" and r["freshness"] != FRESH),
+            "historical": sum(1 for r in records if r["source"] == "telemetry" and r["freshness"] not in (FRESH, AGGREGATED)),
             "triggers": [f"{t['rule']} [{t['evidence']}]" for t in triggers],
             "historical_breaches": len(historical),
             "gaps": [*(state.get("gaps") or []), *gaps],

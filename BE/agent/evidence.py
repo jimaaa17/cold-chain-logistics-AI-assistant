@@ -6,6 +6,7 @@ Pure Python: no I/O, no LLM, unit-testable offline.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable
@@ -14,6 +15,7 @@ FRESH = "fresh"
 HISTORICAL = "historical"
 FORECAST = "forecast"
 UNDATED = "undated"
+AGGREGATED = "aggregated"  # a COUNT/AVG/... row: covers many readings, so it is never "fresh"
 
 SOP_EXCERPT_CHARS = 700
 
@@ -56,9 +58,22 @@ def _plain(value: Any) -> Any:
     return value
 
 
+_LATEST_READING_FILTER = re.compile(r"[=<>]\s*\(\s*SELECT\s+MAX\s*\(\s*\[?Timestamp\]?\s*\)[^()]*\)", re.I)
+_AGGREGATE_SQL = re.compile(r"\bGROUP\s+BY\b|\b(?:COUNT|COUNT_BIG|AVG|SUM|MIN|MAX|STDEVP?|VARP?|STRING_AGG)\s*\(", re.I)
+
+
+def is_aggregate_sql(sql: str) -> bool:
+    """Whether a query's rows summarise several readings. `WHERE Timestamp = (SELECT MAX(Timestamp) ...)`
+    only picks individual readings, so it doesn't count."""
+    return bool(_AGGREGATE_SQL.search(_LATEST_READING_FILTER.sub(" ", sql or "")))
+
+
 def telemetry_records(
-    columns: list[str], rows: Iterable[Iterable[Any]], *, now: datetime, window_hours: float, start: int = 1
+    columns: list[str], rows: Iterable[Iterable[Any]], *, now: datetime, window_hours: float, start: int = 1,
+    aggregated: bool = False,
 ) -> list[dict]:
+    """With `aggregated`, the timestamp is only the newest reading behind the row, so the row is labelled
+    AGGREGATED instead of taking that reading's freshness (and can't trigger or permit an SOP action)."""
     records = []
     for offset, row in enumerate(rows):
         fields = {col: _plain(val) for col, val in zip(columns, row)}
@@ -69,7 +84,7 @@ def telemetry_records(
                 "source": "telemetry",
                 "origin": "FDE_VIEWS.VW_ACTIVE_FLEET",
                 "as_of": as_of.isoformat() if as_of else None,
-                "freshness": classify_freshness(as_of, now, window_hours),
+                "freshness": AGGREGATED if aggregated else classify_freshness(as_of, now, window_hours),
                 "fields": fields,
             }
         )

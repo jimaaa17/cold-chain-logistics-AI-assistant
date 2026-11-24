@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from agent.evidence import FRESH
+from agent.evidence import AGGREGATED, FRESH
 
 SOP_DOC = "Cold_Chain_Incident_SOP_v2.md"
 
@@ -106,6 +106,8 @@ def evaluate_rules(ledger: list[dict[str, Any]]) -> tuple[list[dict], list[dict]
     for rec in ledger:
         if rec.get("source") != "telemetry":
             continue  # only telemetry fields drive SOP rules
+        if rec.get("freshness") == AGGREGATED:
+            continue  # an average or maximum is not one shipment's reading
         for rule in RULES:
             summary = rule.check(rec.get("fields") or {})
             if summary is None:

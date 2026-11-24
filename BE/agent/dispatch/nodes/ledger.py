@@ -35,7 +35,10 @@ def ledger(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
                 notes.append(note)
             continue
         if item["source"] == "telemetry":
-            new = telemetry_records(item["columns"], item["rows"], now=now, window_hours=window, start=counts["telemetry"] + 1)
+            new = telemetry_records(
+                item["columns"], item["rows"], now=now, window_hours=window, start=counts["telemetry"] + 1,
+                aggregated=bool(item.get("aggregated")),
+            )
         elif item["source"] == "weather":
             new = weather_records(item["observations"], now=now, window_hours=window, start=counts["weather"] + 1)
         else:

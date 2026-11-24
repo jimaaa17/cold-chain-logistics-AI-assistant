@@ -13,10 +13,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agent.evidence import FRESH
+from agent.evidence import AGGREGATED, FRESH
 from agent.rules import ACTION_LABELS, HIGH_STAKES_ACTIONS, THRESHOLDS
 
 ACTION_TAG = re.compile(r"ACTION\[(\w+)\]\s*(?:on|for)?\s*\[([TWS]\d+)\]")
+_ALL_CLEAR = re.compile(r"\bno\s+(?:SOP\s+)?actions?\s+(?:is|are)\s+(?:currently\s+)?(?:required|needed)", re.I)
 EVIDENCE_ID = re.compile(r"\[([TWS]\d+)\]")
 
 _STRIP_PATTERNS = (
@@ -122,7 +123,13 @@ def verify_draft(
 
     # Freshness wording
     telemetry = [r for r in ledger if r["source"] == "telemetry"]
-    if telemetry and not any(r["freshness"] == FRESH for r in telemetry):
+    individual = [r for r in telemetry if r["freshness"] != AGGREGATED]
+    if not individual and _ALL_CLEAR.search(draft):
+        problems.append(
+            "Says no SOP action is required, but no individual telemetry reading was checked. Say that SOP "
+            "thresholds were not checked against current readings for this question."
+        )
+    if individual and not any(r["freshness"] == FRESH for r in individual):
         for match in _ACTIVE_CLAIM.finditer(draft):
             if not _NEGATION.search(draft[max(0, match.start() - 60): match.start()]):
                 problems.append(

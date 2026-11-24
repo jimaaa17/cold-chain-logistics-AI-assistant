@@ -35,12 +35,13 @@ def _emit_degraded(emit, step: str, exc: Exception) -> None:
 
 
 def gather_telemetry(payload: dict, runtime: Runtime[DispatchContext]) -> dict:
+    from agent.evidence import is_aggregate_sql
     from agent.tools.telemetry_sql import UnsafeSqlError, fetch_telemetry_rows
 
     ctx, emit = runtime.context, runtime.stream_writer
     sql = payload.get("sql", "")
     emit({"type": "tool_input", "name": "query_telemetry_db", "args": {"sql_query": sql}})
-    result: dict = {"source": "telemetry", "status": "ok", "columns": [], "rows": [], "error": None}
+    result: dict = {"source": "telemetry", "status": "ok", "columns": [], "rows": [], "error": None, "aggregated": is_aggregate_sql(sql)}
     try:
         columns, rows = fetch_telemetry_rows(ctx.resources.engine(), sql, max_rows=ctx.settings.sql_max_rows)
         result["columns"] = columns

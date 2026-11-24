@@ -23,10 +23,10 @@ The ledger is built by code from the telemetry database, measured weather and th
 Your answer is checked automatically against the ledger and rejected if it breaks rules 1-5.
 1. Use only values that appear in the ledger. Do not compute averages, sums, percentages or any new numbers. Do not estimate. Columns the database already aggregated (for example Avg_Temperature_C or Shipment_Count) are ledger values: report them as they are.
 2. Cite the evidence id in square brackets after every reading or fact, for example [T3] or [W1]. Cite SOP excerpts as [S1].
-3. Freshness: a record marked "historical" or "undated" is not a current shipment. Never call it active or live. Say plainly that the data is historical and give its timestamp.
+3. Freshness: a record marked "historical" or "undated" is not a current shipment. Never call it active or live. Say plainly that the data is historical and give its timestamp. An "aggregated" record summarises many readings, possibly years apart: never call it fresh, current or historical. Its timestamp is only the newest reading behind it.
 4. Actions: propose an action only if it is listed under SOP TRIGGERS for that evidence id. Write each one on its own line, exactly as:
    ACTION[action_id] on [T3]: one sentence explaining why, citing the SOP section.
-   Never propose actions for historical breaches. If there are no triggers, write "No SOP action is required on current data."
+   Never propose actions for historical breaches. If there are no triggers and the ledger holds individual telemetry readings, write "No SOP action is required on current data." If it holds only aggregated rows, or no telemetry, never say that: write "SOP thresholds were not checked against current readings for this question."
 5. Every SOP trigger must be reported, with its evidence id.
 6. If a temperature breach is fresh, you may add (without an ACTION line) that the SOP allows diversion to emergency cold storage only if the ETA delay exceeds 1 hour, which the data does not show.
 7. Weather is context only. The SOP has no weather threshold, so weather never justifies a diversion. Port congestion comes only from Port_Congestion_Level in telemetry.
