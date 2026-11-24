@@ -55,6 +55,15 @@ class VerificationEvent(TypedDict, total=False):
     retrying: bool
 
 
+class DegradedEvent(TypedDict):
+    """A data source or model step failed and something else ran instead. Audited."""
+
+    type: Literal["degraded"]
+    step: str
+    fallback: str
+    reason: str  # exception type only
+
+
 class FinalAnswerEvent(TypedDict):
     type: Literal["final_answer"]
     content: str

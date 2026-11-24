@@ -12,7 +12,7 @@ from langgraph.graph.message import add_messages
 
 
 def _collect(old: list | None, new: list | None) -> list:
-    """Fan-in reducer for parallel gather nodes; `None` resets it at the start of each turn."""
+    """Append reducer for lists several nodes write to; `intake` sends `None` to reset it each turn."""
     if new is None:
         return []
     return (old or []) + list(new)
@@ -25,7 +25,10 @@ class DispatchState(TypedDict, total=False):
     planned_calls: list[dict]
     gathered: Annotated[list[dict], _collect]
     ledger: list[dict]
-    gaps: list[str]
+    # "<step>: <reason>" for each source or model step that failed this turn
+    gaps: Annotated[list[str], _collect]
+    notes: list[str]  # valid-but-empty results; shown in the ledger, not failures
+    answer_degraded: bool  # the evidence-only fallback answer, which skips the verifier
     triggers: list[dict]
     historical: list[dict]
     as_of: str

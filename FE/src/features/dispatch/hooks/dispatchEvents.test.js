@@ -80,4 +80,17 @@ describe("applyDispatchEvent", () => {
     expect(msg.state).toBe("error");
     expect(msg.content).toContain("boom");
   });
+
+  it("records degraded steps and clears a draft replaced by the evidence-only fallback", () => {
+    const step = { step: "reasoner", fallback: "evidence-only answer", reason: "AuthenticationError" };
+    const msg = play([
+      ["draft_start", { attempt: 1 }],
+      ["token", { text: "partial" }],
+      ["degraded", step],
+      ["draft_start", { attempt: 1, fallback: true }],
+    ]);
+    expect(msg.degraded).toEqual([step]);
+    expect(msg.draft).toBe("");
+    expect(msg.statusLabel).toBe("Model unavailable; showing the evidence only");
+  });
 });

@@ -29,10 +29,14 @@ def render_final(state: DispatchState) -> str:
         return f"**Proposed action:** {label} [{evidence}]"
 
     body = ACTION_TAG.sub(_action, draft).strip()
+    gaps = state.get("gaps") or []
+    gaps_line = "**Not available:** " + "; ".join(gaps) + "." if gaps else ""
     if verification.get("skipped"):
-        return body
+        return f"{body}\n\n---\n{gaps_line}" if gaps_line else body
     footer = ["", "---"]
-    if verification.get("passed"):
+    if verification.get("degraded"):
+        footer.append("**Unverified:** the language model was unavailable, so this answer lists the evidence only.")
+    elif verification.get("passed"):
         footer.append(
             f"**Verification:** passed. {verification.get('numbers_checked', 0)} numbers and every citation "
             "were checked against the evidence ledger."
@@ -40,6 +44,8 @@ def render_final(state: DispatchState) -> str:
     else:
         footer.append("**Unverified:** the automatic check still failed after one retry. Treat this answer with caution.")
         footer.extend(f"- {p}" for p in verification.get("problems", []))
+    if gaps_line:
+        footer.append(gaps_line)
     if approval:
         line = f"**Dispatcher decision:** {approval['decision']} by {approval['by']} at {approval['at'][:16].replace('T', ' ')} UTC"
         if approval.get("note"):

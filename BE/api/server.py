@@ -47,6 +47,8 @@ _AUDITED_STEPS: dict[str, tuple[str, Optional[str]]] = {
     "approval_required": ("action_gate", "ApprovalRequest"),
     "approval_recorded": ("dispatcher", "ApprovalDecision"),
     "final_answer": ("reasoner_final", "LLM Text Synthesis"),
+    # A model step fell back to code; compliance needs a record of every degraded answer.
+    "degraded": ("fallback", "DegradedStep"),
 }
 # Streamed to the UI only (too fine-grained or purely presentational to audit).
 _STREAM_ONLY_STEPS = {"token", "draft_start", "status"}

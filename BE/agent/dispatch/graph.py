@@ -30,7 +30,7 @@ from agent.dispatch.nodes.gather import gather_sop, gather_telemetry, gather_wea
 from agent.dispatch.nodes.intake import clarify, intake, route_after_intake
 from agent.dispatch.nodes.ledger import ledger, rules
 from agent.dispatch.nodes.planner import planner, route_after_planner
-from agent.dispatch.nodes.reasoning import reasoner, route_after_verifier, verifier
+from agent.dispatch.nodes.reasoning import reasoner, route_after_reasoner, route_after_verifier, verifier
 from agent.dispatch.state import DispatchInput, DispatchOutput, DispatchState
 
 GATHERS = ["gather_telemetry", "gather_weather", "gather_sop"]
@@ -74,7 +74,7 @@ def build_dispatch_workflow(
         builder.add_edge(g, "ledger")
     builder.add_edge("ledger", "rules")
     builder.add_edge("rules", "reasoner")
-    builder.add_edge("reasoner", "verifier")
+    builder.add_conditional_edges("reasoner", route_after_reasoner, ["verifier", "action_gate"])
     builder.add_conditional_edges("verifier", route_after_verifier, ["reasoner", "action_gate"])
     builder.add_edge("action_gate", "finalize")
     builder.add_edge("clarify", "finalize")

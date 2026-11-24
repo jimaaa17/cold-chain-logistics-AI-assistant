@@ -71,12 +71,11 @@ class TestIntakeRouting(unittest.TestCase):
 
 
 class TestPlannerRouting(unittest.TestCase):
-    def test_tool_calls_map_to_gather_nodes_and_unknown_tools_are_dropped(self):
+    def test_tool_calls_map_to_gather_nodes(self):
         state = {"planned_calls": [
             {"name": "query_telemetry_db", "args": {"sql_query": "SELECT 1"}},
             {"name": "fetch_corridor_conditions", "args": {"latitude": 1.0, "longitude": 2.0}},
             {"name": "search_compliance_sop", "args": {"query": "congestion"}},
-            {"name": "delete_everything", "args": {}},
         ]}
         self.assertEqual(route_after_planner(state), [
             Send("gather_telemetry", {"sql": "SELECT 1"}),

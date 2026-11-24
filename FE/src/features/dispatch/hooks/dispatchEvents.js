@@ -3,7 +3,7 @@
  * Shared by the question stream and the approval stream; unit-tested without a browser.
  *
  * Events: status, tool_input, tool_output, evidence, draft_start, token, verification,
- * approval_required, approval_recorded, final_answer, error, done.
+ * degraded, approval_required, approval_recorded, final_answer, error, done.
  */
 export function applyDispatchEvent(message, { type, data = {} }) {
   const m = data.simulated ? { ...message, simulated: true } : message;
@@ -51,7 +51,11 @@ export function applyDispatchEvent(message, { type, data = {} }) {
         ...base,
         draft: "",
         attempt: data.attempt || 1,
-        statusLabel: data.attempt > 1 ? "Rewriting the answer after a failed check..." : "Writing the answer...",
+        statusLabel: data.fallback
+          ? "Model unavailable; showing the evidence only"
+          : data.attempt > 1
+          ? "Rewriting the answer after a failed check..."
+          : "Writing the answer...",
       };
 
     case "token":
@@ -66,6 +70,14 @@ export function applyDispatchEvent(message, { type, data = {} }) {
           : data.retrying
           ? "Check failed; retrying once"
           : "Check failed; answer will be marked unverified",
+      };
+
+    case "degraded":
+      // A model step fell back to code; the final answer's footer lists it too.
+      return {
+        ...base,
+        degraded: [...(base.degraded || []), { step: data.step, fallback: data.fallback, reason: data.reason }],
+        statusLabel: `${data.step} unavailable; using ${data.fallback}`,
       };
 
     case "approval_required":

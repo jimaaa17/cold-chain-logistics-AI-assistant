@@ -137,26 +137,45 @@ def sop_records(chunks: Iterable[Any], *, start: int = 1) -> list[dict]:
     return records
 
 
-def _fmt_value(value: Any) -> str:
+def fmt_value(value: Any) -> str:
     if isinstance(value, float):
         return f"{round(value, 3):g}"
     return str(value)
 
 
-def render_ledger(ledger: list[dict], triggers: list[dict], historical: list[dict], *, now: datetime, window_hours: float) -> str:
-    """Compact text form handed to the reasoner (one line per record)."""
+def render_ledger(
+    ledger: list[dict],
+    triggers: list[dict],
+    historical: list[dict],
+    *,
+    now: datetime,
+    window_hours: float,
+    notes: list[str] | None = None,
+    include_assessment: bool = True,
+) -> str:
+    """Compact text form handed to the models (one line per record).
+
+    `notes` lists valid-but-empty results ("telemetry: no rows matched the query"). With
+    `include_assessment=False` the SOP trigger sections are left out, so a model assessing the
+    thresholds itself isn't anchored on the coded result."""
     lines = [f"EVIDENCE LEDGER (now {now.strftime('%Y-%m-%d %H:%M')} UTC; fresh = newer than {window_hours:g} h)"]
     if not ledger:
         lines.append("(no evidence gathered)")
     for rec in ledger:
         when = rec["as_of"][:16].replace("T", " ") if rec.get("as_of") else "no timestamp"
-        fields = " · ".join(f"{k}={_fmt_value(v)}" for k, v in rec["fields"].items())
+        fields = " · ".join(f"{k}={fmt_value(v)}" for k, v in rec["fields"].items())
         line = f"[{rec['id']}] {rec['source']} · {rec['origin']} · {when} · {rec['freshness']}"
         if fields:
             line += f" · {fields}"
         if rec.get("text"):
             line += f' · "{rec["text"]}"'
         lines.append(line)
+    if notes:
+        lines.append("")
+        lines.append("NOTES (sources that answered with nothing; not failures):")
+        lines.extend(f"- {n}" for n in notes)
+    if not include_assessment:
+        return "\n".join(lines)
     lines.append("")
     lines.append("SOP TRIGGERS (fresh evidence; the only actions you may propose):")
     if not triggers:
