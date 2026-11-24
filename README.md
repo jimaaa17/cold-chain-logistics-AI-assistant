@@ -161,8 +161,8 @@ Run every command from the repository root. The commands are for macOS and Linux
    pip install -r requirements.txt
    npm --prefix FE ci
    ```
-2. Create your configuration, then fill in the API keys and choose two strong passwords.
-   Use mixed case, digits and `!`; avoid `/`, `&`, `#`, quotes and backslashes, which break later commands.
+2. Create your configuration, then fill in the API keys and choose a strong `SQL_ADMIN_PASSWORD`.
+   Use mixed case and digits; avoid `#`, quotes and backslashes. Leave `SQL_AGENT_PASSWORD` empty for now.
    ```sh
    cp .env.example .env
    ```
@@ -178,13 +178,14 @@ Run every command from the repository root. The commands are for macOS and Linux
    ```sh
    python -m legacy_ingest
    ```
-5. Create the read-only view, the agent login and the audit table. Use the password you set as
-   `SQL_AGENT_PASSWORD`; the `sed` command replaces the one in the script.
+5. Create the read-only view, the agent login and the audit table. Then set the agent's password,
+   which the second command generates and saves to `.env`.
    ```sh
-   sed -E "s/(WITH PASSWORD = ')[^']*/\1<agent-password>/" BE/sql/setup_security_view.sql |
-     docker exec -i legacy-mssql /opt/mssql-tools18/bin/sqlcmd \
-       -S localhost -U sa -P '<admin-password>' -C -b -i /dev/stdin
+   docker exec -i legacy-mssql /opt/mssql-tools18/bin/sqlcmd \
+     -S localhost -U sa -P '<admin-password>' -C -b -i /dev/stdin < BE/sql/setup_security_view.sql
+   python scripts/rotate_agent_password.py --yes
    ```
+   If your editor loads `.env` into its terminal, open a new terminal so the new password is used.
 6. Index the SOP in Pinecone. The first run creates the index and downloads the embedding model.
    ```sh
    python -m rag.ingestion
