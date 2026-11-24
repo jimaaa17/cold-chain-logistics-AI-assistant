@@ -64,6 +64,18 @@ class DegradedEvent(TypedDict):
     reason: str  # exception type only
 
 
+class ModelDecisionEvent(TypedDict):
+    """A model was consulted on a decision code also makes. Audited; nothing is shown to the operator."""
+
+    type: Literal["model_decision"]
+    decision: Literal["routing", "thresholds", "verification"]
+    mode: Literal["shadow", "model"]
+    agreed: bool | None  # None: the model call failed
+    code: Any
+    model: Any
+    reasoning: str
+
+
 class FinalAnswerEvent(TypedDict):
     type: Literal["final_answer"]
     content: str

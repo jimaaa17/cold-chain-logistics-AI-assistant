@@ -11,10 +11,12 @@ from langgraph.types import Send
 from agent.config import AgentSettings
 from agent.dispatch.context import DispatchContext, DispatchResources
 from agent.dispatch.nodes.approval import action_gate
-from agent.dispatch.nodes.intake import clarify, route_after_intake
-from agent.dispatch.nodes.ledger import ledger, rules
+from agent.dispatch.nodes.assess import assess
+from agent.dispatch.nodes.intake import clarify
+from agent.dispatch.nodes.ledger import ledger
 from agent.dispatch.nodes.planner import route_after_planner
 from agent.dispatch.nodes.reasoning import route_after_verifier
+from agent.dispatch.nodes.route import route_after_route
 from agent.dispatch.streaming import iter_dispatch_events
 from agent.intent import SCAN_SOP_QUERY, classify_intent
 from agent.verifier import MAX_ATTEMPTS
@@ -42,7 +44,7 @@ def state_for(question):
 class TestIntakeRouting(unittest.TestCase):
     def test_scan_with_area_fans_out_to_all_three_sources(self):
         runtime, _ = make_runtime()
-        sends = route_after_intake(state_for("Which shipments are above 4 °C near Long Beach?"), runtime)
+        sends = route_after_route(state_for("Which shipments are above 4 °C near Long Beach?"), runtime)
         self.assertEqual([s.node for s in sends], ["gather_telemetry", "gather_weather", "gather_sop"])
         self.assertIn("Current_Temperature_C > 4", sends[0].arg["sql"])
         self.assertEqual(sends[2].arg, {"query": SCAN_SOP_QUERY})
@@ -50,18 +52,18 @@ class TestIntakeRouting(unittest.TestCase):
     def test_scan_sql_uses_settings_from_the_context(self):
         settings = AgentSettings(_env_file=None, sql_max_rows=3)
         ctx = DispatchContext(settings=settings, resources=DispatchResources(settings))
-        sends = route_after_intake(state_for("Which shipments are above 4 °C near Long Beach?"), Runtime(context=ctx))
+        sends = route_after_route(state_for("Which shipments are above 4 °C near Long Beach?"), Runtime(context=ctx))
         self.assertIn("TOP 3", sends[0].arg["sql"])
 
     def test_sop_lookup_searches_the_sop_with_the_question(self):
         runtime, _ = make_runtime()
         question = "What does the SOP say about port congestion?"
-        self.assertEqual(route_after_intake(state_for(question), runtime), [Send("gather_sop", {"query": question})])
+        self.assertEqual(route_after_route(state_for(question), runtime), [Send("gather_sop", {"query": question})])
 
     def test_open_and_clarify_routes(self):
         runtime, _ = make_runtime()
-        self.assertEqual(route_after_intake(state_for("What is the average temperature per risk class?"), runtime), "planner")
-        self.assertEqual(route_after_intake(state_for("Tell me a joke"), runtime), "clarify")
+        self.assertEqual(route_after_route(state_for("What is the average temperature per risk class?"), runtime), "planner")
+        self.assertEqual(route_after_route(state_for("Tell me a joke"), runtime), "clarify")
 
     def test_clarify_answers_with_the_context_text(self):
         runtime, _ = make_runtime(clarify_text="ask me about shipments")
@@ -102,10 +104,10 @@ class TestLedgerAndRules(unittest.TestCase):
         self.assertEqual(out["as_of"], NOW.isoformat())  # the injected clock, not the wall clock
         self.assertEqual(out["ledger"][0]["freshness"], "fresh")
 
-    def test_rules_emits_the_evidence_summary(self):
+    def test_assess_emits_the_evidence_summary(self):
         runtime, events = make_runtime()
         records = ledger({"gathered": [{"source": "telemetry", "columns": COLUMNS, "rows": [FRESH_BREACH], "error": None}]}, runtime)
-        out = rules({**records, "gaps": ["sop: SOP knowledge base unavailable"]}, runtime)
+        out = assess({**records, "gaps": ["sop: SOP knowledge base unavailable"]}, runtime)
         self.assertEqual({t["rule"] for t in out["triggers"]}, {"TEMP_BREACH", "PORT_CONGESTION", "HIGH_RISK_DELAY"})
         [event] = events
         self.assertEqual(event["type"], "evidence")

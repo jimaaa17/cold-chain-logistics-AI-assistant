@@ -1,14 +1,13 @@
-"""intake (routes the question in code), its router, and clarify (no tools, no LLM)."""
+"""intake (resets the turn and routes the question in code) and clarify (no tools, no LLM)."""
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
-from langgraph.types import Send
 
 from agent.dispatch.context import DispatchContext
 from agent.dispatch.state import DispatchState
 from agent.dispatch.text import text_of
-from agent.intent import SCAN_SOP_QUERY, Intent, build_scan_sql, classify_intent
+from agent.intent import classify_intent
 
 
 def intake(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
@@ -32,30 +31,6 @@ def intake(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
         "verification": None,
         "approval": None,
     }
-
-
-def route_after_intake(state: DispatchState, runtime: Runtime[DispatchContext]):
-    intent = Intent(**state["intent"])
-    if intent.kind == "clarify":
-        return "clarify"
-    if intent.kind == "open":
-        return "planner"
-    cfg = runtime.context.settings
-    sends: list[Send] = []
-    if intent.kind == "incident_scan":
-        sql = build_scan_sql(intent, half_width_deg=cfg.area_half_width_deg, max_rows=cfg.sql_max_rows)
-        sends.append(Send("gather_telemetry", {"sql": sql}))
-        if intent.has_area:
-            sends.append(
-                Send(
-                    "gather_weather",
-                    {"latitude": intent.latitude, "longitude": intent.longitude, "past_days": 0, "forecast_days": 1},
-                )
-            )
-        sends.append(Send("gather_sop", {"query": SCAN_SOP_QUERY}))
-    else:  # sop_lookup
-        sends.append(Send("gather_sop", {"query": state["question"]}))
-    return sends
 
 
 def clarify(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:

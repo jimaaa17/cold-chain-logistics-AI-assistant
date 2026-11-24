@@ -6,6 +6,7 @@ inside `build_reasoner_llm`, so importing this module stays cheap.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -53,6 +54,26 @@ def build_reasoner_llm(settings: AgentSettings | None = None) -> BaseChatModel:
     except ImportError:
         from langchain_community.chat_models.ollama import ChatOllama  # type: ignore[no-redef]
     return ChatOllama(model=cfg.ollama_model, temperature=cfg.llm_temperature, num_predict=1024)
+
+
+class LLMTask(str, Enum):
+    """Model steps that may use their own model (`<task>_model` in AgentSettings)."""
+
+    ROUTER = "router"
+    ASSESS = "assess"
+    JUDGE = "judge"
+
+
+_MODEL_FIELD = {"OPENAI": "openai_model", "GEMINI": "gemini_model", "OLLAMA": "ollama_model"}
+
+
+def build_task_llm(settings: AgentSettings, task: LLMTask) -> BaseChatModel | None:
+    """The task's own model at temperature 0, or None when it shares the reasoner's model."""
+    model = getattr(settings, f"{task.value}_model")
+    if not model:
+        return None
+    field = _MODEL_FIELD[settings.agent_llm or "OLLAMA"]
+    return build_reasoner_llm(settings.model_copy(update={field: model, "llm_temperature": 0.0}))
 
 
 def build_default_tools(settings: AgentSettings | None = None) -> list[BaseTool]:

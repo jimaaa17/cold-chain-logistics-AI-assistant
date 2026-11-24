@@ -69,6 +69,16 @@ class AgentSettings(BaseSettings):
     evidence_freshness_hours: float = Field(default=24.0, gt=0.0)
     # Half-width (degrees) of the box searched around a named place such as "Long Beach".
     area_half_width_deg: float = Field(default=0.35, gt=0.0, le=5.0)
+    # Who decides, per step. "code": coded logic only. "shadow": also ask the model and audit the
+    # comparison, but use the coded result. "model": use the model within the coded guardrails.
+    routing_mode: Literal["code", "shadow", "model"] = "code"
+    thresholds_mode: Literal["code", "shadow", "model"] = "code"
+    verification_mode: Literal["code", "shadow", "model"] = "code"
+    # Optional models for those steps (same provider as AGENT_LLM); unset = the reasoner's model.
+    # Use a judge model that differs from the reasoner's, so the checker doesn't share its blind spots.
+    router_model: str | None = None
+    assess_model: str | None = None
+    judge_model: str | None = None
     # Load the embedding model, Pinecone client and graph when the API server starts.
     agent_prewarm: bool = True
 

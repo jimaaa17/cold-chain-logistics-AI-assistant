@@ -9,28 +9,36 @@ from datetime import datetime
 
 from langgraph.runtime import Runtime
 
+from agent.dispatch.consult import consult, emit_decision
 from agent.dispatch.context import DispatchContext
 from agent.dispatch.prompts import gaps_block, retry_block
 from agent.dispatch.resilience import EmptyModelReply, run_model_step
+from agent.dispatch.schemas import Verdict
 from agent.dispatch.state import DispatchState
 from agent.dispatch.text import history, text_of
 from agent.evidence import fmt_value, render_ledger
+from agent.llm import LLMTask
 from agent.rules import ACTION_LABELS
 from agent.verifier import MAX_ATTEMPTS, verify_draft
 
 
 FALLBACK_GAP = "answer: model unavailable, showing evidence only"
+JUDGE_FALLBACK_GAP = "verification: model unavailable, checked by code rules only"
+
+
+def _ledger_text(state: DispatchState, ctx: DispatchContext) -> str:
+    return render_ledger(
+        state.get("ledger", []), state.get("triggers", []), state.get("historical", []),
+        now=datetime.fromisoformat(state["as_of"]) if state.get("as_of") else ctx.clock(),
+        window_hours=ctx.settings.evidence_freshness_hours, notes=state.get("notes") or None,
+    )
 
 
 def reasoner(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
     ctx = runtime.context
     attempt = int(state.get("attempts", 0)) + 1
     llm = ctx.resources.llm()
-    now = datetime.fromisoformat(state["as_of"]) if state.get("as_of") else ctx.clock()
-    ledger_text = render_ledger(
-        state.get("ledger", []), state.get("triggers", []), state.get("historical", []),
-        now=now, window_hours=ctx.settings.evidence_freshness_hours, notes=state.get("notes") or None,
-    )
+    ledger_text = _ledger_text(state, ctx)
     previous = state.get("verification") or {}
     msgs = ctx.reasoner_prompt.format_messages(
         freshness_hours=f"{ctx.settings.evidence_freshness_hours:g}",
@@ -118,7 +126,32 @@ def evidence_only_answer(state: DispatchState) -> str:
     return "\n".join(lines)
 
 
+def _judge(state: DispatchState, runtime: Runtime[DispatchContext], mode: str) -> tuple[list[str], list[str]]:
+    """(problems the model judge adds, gaps). Only called for drafts the code checks passed."""
+    ctx = runtime.context
+    verdict, gaps = consult(
+        runtime, decision="verification", mode=mode, task=LLMTask.JUDGE, schema=Verdict,
+        messages=ctx.judge_prompt.format_messages(
+            question=state.get("question", ""), ledger=_ledger_text(state, ctx), draft=state.get("draft", ""),
+            gaps="; ".join(state.get("gaps") or []) or "none",
+        ),
+        fallback_name="code checks only", gap=JUDGE_FALLBACK_GAP,
+    )
+    if verdict is None:
+        return [], gaps
+    emit_decision(
+        runtime, decision="verification", mode=mode, agreed=verdict.passed,
+        code={"passed": True}, model=verdict.model_dump(),
+    )
+    if mode == "shadow" or verdict.passed:
+        return [], gaps
+    return [f"Model check: {p[:300]}" for p in verdict.problems[:5]] or ["Model check: rejected without a reason."], gaps
+
+
 def verifier(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
+    """Code checks first. A model judge (VERIFICATION_MODE) can only add problems: it runs on drafts that
+    passed, never clears a failure, and `proposed_actions` always comes from the code check."""
+    mode = runtime.context.settings.verification_mode
     result = verify_draft(
         state.get("draft", ""),
         ledger=state.get("ledger", []),
@@ -127,10 +160,15 @@ def verifier(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
         question=state.get("question", ""),
         window_hours=runtime.context.settings.evidence_freshness_hours,
     )
+    gaps: list[str] = []
+    if mode != "code" and result["passed"]:
+        added, gaps = _judge(state, runtime, mode)
+        result["problems"] = [*result["problems"], *added]
+        result["passed"] = not result["problems"]
     result["attempt"] = state.get("attempts", 1)
     retrying = not result["passed"] and result["attempt"] < MAX_ATTEMPTS
     runtime.stream_writer({"type": "verification", **result, "retrying": retrying})
-    return {"verification": result}
+    return {"verification": result, "gaps": gaps}
 
 
 def route_after_reasoner(state: DispatchState) -> str:

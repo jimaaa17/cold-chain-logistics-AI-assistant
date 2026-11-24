@@ -1,4 +1,4 @@
-"""ledger (gathered results -> numbered evidence records with freshness) and rules (SOP §1-§3 as code)."""
+"""ledger: gathered results -> numbered evidence records with freshness, gaps and notes."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -8,7 +8,6 @@ from langgraph.runtime import Runtime
 from agent.dispatch.context import DispatchContext
 from agent.dispatch.state import DispatchState
 from agent.evidence import sop_records, telemetry_records, weather_records
-from agent.rules import evaluate_rules
 
 _SOURCE_ORDER = {"telemetry": 0, "weather": 1, "sop": 2}
 _EMPTY_NOTES = {
@@ -45,21 +44,3 @@ def ledger(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
         records.extend(new)
     # `gaps` appends (reducer): planner/router gaps recorded earlier this turn are kept
     return {"ledger": records, "gaps": gaps, "notes": notes, "as_of": now.isoformat()}
-
-
-def rules(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
-    ledger_records = state.get("ledger", [])
-    triggers, historical = evaluate_rules(ledger_records)
-    runtime.stream_writer(
-        {
-            "type": "evidence",
-            "records": len(ledger_records),
-            "fresh": sum(1 for r in ledger_records if r["freshness"] == "fresh"),
-            "historical": sum(1 for r in ledger_records if r["source"] == "telemetry" and r["freshness"] != "fresh"),
-            "triggers": [f"{t['rule']} [{t['evidence']}]" for t in triggers],
-            "historical_breaches": len(historical),
-            "gaps": state.get("gaps") or [],
-            "notes": state.get("notes") or [],
-        }
-    )
-    return {"triggers": triggers, "historical": historical}

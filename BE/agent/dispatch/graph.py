@@ -1,13 +1,17 @@
 """Topology of the dispatch workflow. Node bodies live in `dispatch/nodes/`.
 
-    intake ─┬─ clarify ────────────────────────────────────────────────┐
-            ├─ (fixed fan-out, Send) gather_telemetry ┐                  │
-            │                         gather_weather   ├─ ledger ─ rules ─ reasoner ─ verifier ─┬─ action_gate ─ finalize
-            │                         gather_sop       ┘                    ▲                   │   (interrupt for
-            └─ planner (LLM picks tools, Send) ───────┘                    └── retry once ─────┘    dispatcher approval)
+    intake ─ route ─┬─ clarify ──────────────────────────────────────────────────────────────┐
+                    ├─ (fixed fan-out, Send) gather_telemetry ┐                                │
+                    │                         gather_weather   ├─ ledger ─ assess ─ reasoner ─ verifier ─ action_gate ─ finalize
+                    │                         gather_sop       ┘                      ▲            │       (interrupt for
+                    └─ planner (LLM picks tools, Send) ───────┘                      └ retry once ┘        dispatcher approval)
 
-Who decides what: tools report facts, code applies SOP thresholds/freshness/verification, the LLM
-judges and explains, and a dispatcher approves high-stakes actions.
+    An evidence-only fallback from the reasoner skips the verifier.
+
+Who decides what: tools report facts; code computes freshness, applies the SOP rules, permits actions,
+guards SQL and checks the draft; the LLM plans, judges and explains; a dispatcher approves high-stakes
+actions. `ROUTING_MODE`, `THRESHOLDS_MODE` and `VERIFICATION_MODE` (code | shadow | model) let a model
+take part in three of those decisions, always within the coded guardrails.
 
 The compiled graph carries its `DispatchContext` as `graph.dispatch_context`; run it through
 `streaming.iter_dispatch_events`, which passes that context in. Calling `graph.stream`/`invoke`
@@ -25,12 +29,14 @@ from langgraph.graph import END, START, StateGraph
 from agent.config import AgentSettings, get_agent_settings
 from agent.dispatch.context import DispatchContext, DispatchResources
 from agent.dispatch.nodes.approval import action_gate
+from agent.dispatch.nodes.assess import assess
 from agent.dispatch.nodes.finalize import finalize
 from agent.dispatch.nodes.gather import gather_sop, gather_telemetry, gather_weather
-from agent.dispatch.nodes.intake import clarify, intake, route_after_intake
-from agent.dispatch.nodes.ledger import ledger, rules
+from agent.dispatch.nodes.intake import clarify, intake
+from agent.dispatch.nodes.ledger import ledger
 from agent.dispatch.nodes.planner import planner, route_after_planner
 from agent.dispatch.nodes.reasoning import reasoner, route_after_reasoner, route_after_verifier, verifier
+from agent.dispatch.nodes.route import route, route_after_route
 from agent.dispatch.state import DispatchInput, DispatchOutput, DispatchState
 
 GATHERS = ["gather_telemetry", "gather_weather", "gather_sop"]
@@ -55,25 +61,27 @@ def build_dispatch_workflow(
         output_schema=DispatchOutput,
     )
     builder.add_node("intake", intake)
+    builder.add_node("route", route)
     builder.add_node("clarify", clarify)
     builder.add_node("planner", planner)
     builder.add_node("gather_telemetry", gather_telemetry)
     builder.add_node("gather_weather", gather_weather)
     builder.add_node("gather_sop", gather_sop)
     builder.add_node("ledger", ledger)
-    builder.add_node("rules", rules)
+    builder.add_node("assess", assess)
     builder.add_node("reasoner", reasoner)
     builder.add_node("verifier", verifier)
     builder.add_node("action_gate", action_gate)
     builder.add_node("finalize", finalize)
 
     builder.add_edge(START, "intake")
-    builder.add_conditional_edges("intake", route_after_intake, ["clarify", "planner", *GATHERS])
+    builder.add_edge("intake", "route")
+    builder.add_conditional_edges("route", route_after_route, ["clarify", "planner", *GATHERS])
     builder.add_conditional_edges("planner", route_after_planner, [*GATHERS, "ledger"])
     for g in GATHERS:
         builder.add_edge(g, "ledger")
-    builder.add_edge("ledger", "rules")
-    builder.add_edge("rules", "reasoner")
+    builder.add_edge("ledger", "assess")
+    builder.add_edge("assess", "reasoner")
     builder.add_conditional_edges("reasoner", route_after_reasoner, ["verifier", "action_gate"])
     builder.add_conditional_edges("verifier", route_after_verifier, ["reasoner", "action_gate"])
     builder.add_edge("action_gate", "finalize")

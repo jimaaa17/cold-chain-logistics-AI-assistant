@@ -53,6 +53,8 @@ class SopRule:
     threshold: float
     actions: tuple[str, ...]
     check: Callable[[dict], str | None]  # returns a human summary when breached, else None
+    view_field: str  # the semantic view's name for sop_field
+    direction: str  # ">" or "<"
 
 
 def _temp_breach(f: dict) -> str | None:
@@ -85,13 +87,13 @@ RULES: tuple[SopRule, ...] = (
     # Telemetry has no ETA field, so code cannot confirm that condition and does not permit it;
     # add it here once an ETA delay column exists in the view.
     SopRule("TEMP_BREACH", f"{SOP_DOC} §1 Critical Breach", "IOT_TEMP_VAL_C", 4.0,
-            ("restart_cooling",), _temp_breach),
+            ("restart_cooling",), _temp_breach, "Current_Temperature_C", ">"),
     SopRule("TEMP_BELOW_RANGE", f"{SOP_DOC} §1 Fresh Perishables range", "IOT_TEMP_VAL_C", 0.0,
-            (), _temp_below_range),
+            (), _temp_below_range, "Current_Temperature_C", "<"),
     SopRule("PORT_CONGESTION", f"{SOP_DOC} §2 Port of Long Beach / LA", "PRT_CNG_LVL", 7.0,
-            ("divert_inland_empire",), _port_congestion),
+            ("divert_inland_empire",), _port_congestion, "Port_Congestion_Level", ">"),
     SopRule("HIGH_RISK_DELAY", f"{SOP_DOC} §3 Risk Classification Triggers", "DELAY_PROB_DEC", 0.65,
-            ("escalate_tier2",), _high_risk_delay),
+            ("escalate_tier2",), _high_risk_delay, "Delay_Probability", ">"),
 )
 
 THRESHOLDS = tuple(sorted({r.threshold for r in RULES}))
@@ -113,6 +115,8 @@ def evaluate_rules(ledger: list[dict[str, Any]]) -> tuple[list[dict], list[dict]
                 "evidence": rec["id"],
                 "summary": summary,
                 "sop_ref": rule.sop_ref,
+                "field": rule.view_field,
+                "direction": rule.direction,
                 "freshness": rec.get("freshness"),
                 "actions": list(rule.actions),
                 "high_stakes": any(a in HIGH_STAKES_ACTIONS for a in rule.actions),

@@ -12,8 +12,11 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from agent.config import AgentSettings
 from agent.dispatch.prompts import CLARIFY_TEXT
+from agent.dispatch.prompts import assessor_prompt as ASSESSOR_PROMPT
+from agent.dispatch.prompts import judge_prompt as JUDGE_PROMPT
 from agent.dispatch.prompts import planner_prompt as PLANNER_PROMPT
 from agent.dispatch.prompts import reasoner_prompt as REASONER_PROMPT
+from agent.dispatch.prompts import router_prompt as ROUTER_PROMPT
 from agent.evidence import utc_now
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,7 @@ class DispatchResources:
         engine: Any | None = None,
         http_client: Any | None = None,
         retrieval_service: Any | None = None,
+        task_llms: dict[Any, Any] | None = None,
     ) -> None:
         self.settings = settings
         self._llm = llm
@@ -38,6 +42,7 @@ class DispatchResources:
         self._engine = engine
         self._http = http_client
         self._retrieval = retrieval_service
+        self._task_llms: dict[Any, Any] = dict(task_llms or {})
         self._lock = threading.Lock()
 
     def llm(self):
@@ -56,6 +61,16 @@ class DispatchResources:
 
                 self._planner_llm = llm.bind_tools(build_default_tools(self.settings))
             return self._planner_llm
+
+    def task_llm(self, task):
+        """The model for an `agent.llm.LLMTask`: its own if configured, else the reasoner's."""
+        shared = None if task in self._task_llms else self.llm()
+        with self._lock:
+            if task not in self._task_llms:
+                from agent.llm import build_task_llm
+
+                self._task_llms[task] = build_task_llm(self.settings, task) or shared
+            return self._task_llms[task]
 
     def engine(self):
         with self._lock:
@@ -114,6 +129,9 @@ class DispatchContext:
     # ChatPromptTemplate is an unhashable pydantic model, which dataclasses reject as a plain default
     reasoner_prompt: ChatPromptTemplate = field(default_factory=lambda: REASONER_PROMPT)
     planner_prompt: ChatPromptTemplate = field(default_factory=lambda: PLANNER_PROMPT)
+    router_prompt: ChatPromptTemplate = field(default_factory=lambda: ROUTER_PROMPT)
+    assessor_prompt: ChatPromptTemplate = field(default_factory=lambda: ASSESSOR_PROMPT)
+    judge_prompt: ChatPromptTemplate = field(default_factory=lambda: JUDGE_PROMPT)
     clarify_text: str = CLARIFY_TEXT
 
     @classmethod

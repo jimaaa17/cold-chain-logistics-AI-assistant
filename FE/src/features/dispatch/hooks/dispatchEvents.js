@@ -3,7 +3,7 @@
  * Shared by the question stream and the approval stream; unit-tested without a browser.
  *
  * Events: status, tool_input, tool_output, evidence, draft_start, token, verification,
- * degraded, approval_required, approval_recorded, final_answer, error, done.
+ * degraded, model_decision (audit only, ignored here), approval_required, approval_recorded, final_answer, error, done.
  */
 export function applyDispatchEvent(message, { type, data = {} }) {
   const m = data.simulated ? { ...message, simulated: true } : message;
