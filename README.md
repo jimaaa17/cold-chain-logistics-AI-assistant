@@ -150,7 +150,13 @@ src/                 Original Streamlit app (superseded by BE/ and FE/)
 
 ### Installation
 
-Run every command from the repository root. The commands are for macOS and Linux.
+Run every command from the repository root, for macOS or Linux. After step 1,
+activate the environment and set Python's import path in each new terminal:
+
+```sh
+source venv/bin/activate
+export PYTHONPATH=BE:.
+```
 
 1. Clone the repo and install the dependencies.
    ```sh
@@ -158,6 +164,7 @@ Run every command from the repository root. The commands are for macOS and Linux
    cd cold-chain-logistics-AI-assistant
    python3.12 -m venv venv
    source venv/bin/activate
+   export PYTHONPATH=BE:.
    pip install -r requirements.txt
    npm --prefix FE ci
    ```
@@ -283,8 +290,8 @@ npm --prefix FE run build
 
 GitHub Actions runs the backend tests, then the frontend tests and build, on pull requests and pushes
 to `main`. **Merging to `main` deploys to EC2** when the checks pass. A restart drops in-memory
-sessions, including pending approvals. A green run doesn't prove the services restarted, so check
-`/healthz` afterwards.
+sessions, including pending approvals. The deploy fails unless the API starts (`/healthz`) and can read
+telemetry (`/readyz`), but there is no rollback: after a failure, the new code stays in place.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
