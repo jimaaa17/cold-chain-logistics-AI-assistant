@@ -52,9 +52,10 @@ jobs:
   deploy:
     name: Deploy to EC2 via SSH
     needs: ci-verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    # `inputs` is empty on push events, so fall back to the environment that holds the EC2_* secrets.
+    environment: ${{ inputs.environment || 'FDE-YT-Cold' }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -66,12 +67,17 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            # One command per line: `set -e` ignores failures in the middle of an && chain.
+            set -e
             cd /home/ubuntu/cold-chain-logistics-FDE-Project
             git pull origin main
             source venv/bin/activate
             pip install -r requirements.txt
             if [ -d "FE" ] && command -v npm >/dev/null 2>&1; then
-              cd FE && npm install && npm run build && cd ..
+              cd FE
+              npm install
+              npm run build
+              cd ..
             fi
             sudo systemctl restart fde-api || true
             sudo systemctl restart streamlit || true
