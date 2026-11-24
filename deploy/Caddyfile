@@ -1,0 +1,16 @@
+# HTTPS front door for the API on EC2. Install steps: docs/instructions.md, Phase 7.
+# The host name must match FE/vercel.json.
+# Only /api/* is public: health checks, API docs and the built frontend stay on 127.0.0.1.
+coldchain-dispatch-api.duckdns.org {
+	handle /api/* {
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+	handle {
+		respond 404
+	}
+}

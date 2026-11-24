@@ -14,6 +14,7 @@ project_root = Path(__file__).resolve().parents[2]
 if str(be_root) not in sys.path:
     sys.path.insert(0, str(be_root))
 
+from api.origin_auth import OriginSecretMiddleware, check_origin  # noqa: E402
 from observability import get_langfuse_bridge, new_span_id, new_trace_id  # noqa: E402
 
 try:
@@ -571,6 +572,14 @@ def _env_flag(name: str, *, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+AUDIT_LOGIN_DISABLED = {"detail": "Audit log sign-in is turned off on this server."}
+
+
+def audit_login_enabled() -> bool:
+    """False on a public server, so the audit screen can't be used to guess SQL admin passwords."""
+    return _env_flag("AUDIT_LOGIN_ENABLED", default=True)
+
+
 def default_session_purger(session_id: str) -> bool:
     """Deletes the conversation memory (LangGraph checkpoint) for `session_id` in this process.
 
@@ -659,7 +668,6 @@ def create_app(
 ):
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, HTTPException
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, StreamingResponse
     from pydantic import BaseModel, Field
 
@@ -708,13 +716,9 @@ def create_app(
         lifespan=lifespan,
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # No CORS: the browser always calls /api on its own origin (Vite proxy, Vercel or this server).
+    app.add_middleware(OriginSecretMiddleware)
+    sse_headers = {"Cache-Control": "no-cache"}
 
     @app.get("/healthz")
     def healthz():
@@ -758,6 +762,7 @@ def create_app(
         return StreamingResponse(
             generate_dispatch_sse_frames(req.session_id, req.prompt, streamer_fn, writer_fn),
             media_type="text/event-stream",
+            headers=sse_headers,
         )
 
     @app.post("/api/v1/dispatch/approve")
@@ -775,10 +780,13 @@ def create_app(
                 prompt_audit=("approval", "Dispatcher"),
             ),
             media_type="text/event-stream",
+            headers=sse_headers,
         )
 
     @app.post("/api/v1/audit/logs")
     def query_audit_logs(req: AuditQueryRequest):
+        if not audit_login_enabled():
+            return JSONResponse(AUDIT_LOGIN_DISABLED, status_code=403)
         try:
             rows = reader_fn(
                 username=req.username,
@@ -825,7 +833,6 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(raw)
 
@@ -834,15 +841,11 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
             raw = self.rfile.read(length) if length > 0 else b"{}"
             return json.loads(raw.decode("utf-8") or "{}")
 
-        def do_OPTIONS(self):
-            self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
-            self.end_headers()
-
         def do_GET(self):
             parsed = urlparse(self.path)
+            rejection = check_origin(parsed.path, self.headers)
+            if rejection:
+                return self._send_json(*rejection)
             if parsed.path == "/healthz":
                 return self._send_json(200, {"status": "ok", "service": "fde-dispatch-bff"})
             if parsed.path == "/readyz":
@@ -882,6 +885,9 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
         def do_POST(self):
             parsed = urlparse(self.path)
             body = self._read_json()
+            rejection = check_origin(parsed.path, self.headers)
+            if rejection:
+                return self._send_json(*rejection)
 
             if parsed.path == "/api/v1/session/purge":
                 return self._send_json(200, build_purge_payload(body.get("old_session_id")))
@@ -893,7 +899,6 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 for frame in generate_dispatch_sse_frames(
                     session_id, prompt, default_agent_streamer, default_audit_writer
@@ -914,7 +919,6 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 for frame in generate_dispatch_sse_frames(
                     session_id,
@@ -928,6 +932,8 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
                 return
 
             if parsed.path == "/api/v1/audit/logs":
+                if not audit_login_enabled():
+                    return self._send_json(403, AUDIT_LOGIN_DISABLED)
                 try:
                     rows = default_audit_reader(
                         username=str(body.get("username") or ""),
