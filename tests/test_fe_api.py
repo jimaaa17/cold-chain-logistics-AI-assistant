@@ -319,6 +319,7 @@ class TestBffAuditPath(unittest.TestCase):
                 "SQL_SERVER_HOST": "db.internal",
                 "SQL_SERVER_DATABASE": "FleetDB",
                 "SQL_AGENT_USER": "USR_FDE_RO",
+                "SQL_AGENT_PASSWORD": "agent-pass-123",
                 "AUDIT_TABLE": "FDE_VIEWS.AgentAuditLog",
                 "SQL_ADMIN_USER": "fde_admin",
                 "SQL_ADMIN_PASSWORD": "admin-pass-123",
@@ -402,6 +403,7 @@ class TestMetaAndDemoDrift(unittest.TestCase):
         from rag.config import get_settings
 
         self.server, self.mock = server, mock
+        mock.patch.dict("os.environ", {"SQL_AGENT_PASSWORD": "agent-pass-123"}).start()
         for cache in (get_agent_settings, get_settings):
             cache.cache_clear()
             self.addCleanup(cache.cache_clear)
