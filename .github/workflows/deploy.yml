@@ -52,9 +52,10 @@ jobs:
   deploy:
     name: Deploy to EC2 via SSH
     needs: ci-verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    # `inputs` is empty on push events, so fall back to the environment that holds the EC2_* secrets.
+    environment: ${{ inputs.environment || 'FDE-YT-Cold' }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
