@@ -70,14 +70,16 @@ jobs:
             # One command per line: `set -e` ignores failures in the middle of an && chain.
             set -e
             cd /home/ubuntu/cold-chain-logistics-FDE-Project
-            git pull origin main
+            git pull --ff-only origin main
             source venv/bin/activate
             pip install -r requirements.txt
-            if [ -d "FE" ] && command -v npm >/dev/null 2>&1; then
-              cd FE
-              npm install
-              npm run build
-              cd ..
-            fi
-            sudo systemctl restart fde-api || true
+            command -v npm >/dev/null || { echo "npm is not installed on the server" >&2; exit 1; }
+            cd FE
+            npm ci
+            npm run build
+            cd ..
+            sudo systemctl restart fde-api
+            # The API loads its model before it accepts requests. Don't print service logs here: the repo is public.
+            curl -fsS --max-time 10 --retry 45 --retry-delay 2 --retry-all-errors http://127.0.0.1:8000/healthz
+            curl -sS --fail-with-body --max-time 60 --retry 3 --retry-delay 5 --retry-all-errors http://127.0.0.1:8000/readyz
             sudo systemctl restart streamlit || true

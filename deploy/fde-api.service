@@ -1,0 +1,18 @@
+# systemd unit for the FastAPI gateway on EC2. Install steps: docs/instructions.md, Phase 6.
+# The app reads .env itself. Don't add EnvironmentFile: systemd keeps inline comments as part of the value.
+# Keep --host 127.0.0.1: the API has no login, so reach it through an SSH tunnel.
+[Unit]
+Description=Cold-Chain FastAPI gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cold-chain-logistics-FDE-Project
+Environment=PYTHONPATH=/home/ubuntu/cold-chain-logistics-FDE-Project/BE:/home/ubuntu/cold-chain-logistics-FDE-Project
+ExecStart=/home/ubuntu/cold-chain-logistics-FDE-Project/venv/bin/uvicorn api.server:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

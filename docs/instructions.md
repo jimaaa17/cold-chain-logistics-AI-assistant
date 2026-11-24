@@ -223,3 +223,15 @@ sudo systemctl daemon-reload
 sudo systemctl enable streamlit
 sudo systemctl start streamlit
 ```
+
+8. Install the API service (the deploy restarts it, but does not install it)
+```
+cd /home/ubuntu/cold-chain-logistics-FDE-Project
+sudo cp deploy/fde-api.service /etc/systemd/system/fde-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now fde-api
+curl -s localhost:8000/healthz     # the process is up (the model takes a few seconds to load)
+curl -s localhost:8000/readyz      # the agent builds and the telemetry database can be read
+```
+- The server needs Node 20 with `npm`, and `.env` in the project folder.
+- The API listens on 127.0.0.1 only because it has no login. From a laptop: `ssh -L 8000:localhost:8000 ubuntu@<EC2 host>`

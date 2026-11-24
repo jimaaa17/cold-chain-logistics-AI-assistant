@@ -24,7 +24,7 @@ Package-level rules live in `BE/AGENTS.md` and `FE/AGENTS.md`, and the FE visual
 
 Python 3.12, local venv at `venv/`, `pip install -r requirements.txt`. Configuration comes from `.env` at the repo root. Node 20 for `FE/`.
 
-**Import path:** the root `sitecustomize.py` puts `BE/` on `sys.path` when Python starts from the repo root, so code imports `agent`, `rag`, `api`, `observability` and `legacy_ingest` as top-level packages (never `BE.agent`). CI sets `PYTHONPATH=BE:.` for the same effect, and `pyproject.toml` sets the pytest `pythonpath`.
+**Import path:** code imports `agent`, `rag`, `api`, `observability` and `legacy_ingest` as top-level packages (never `BE.agent`), so `BE/` must be on the import path. Set `PYTHONPATH=BE:.` when running the commands below, as CI does (the `fde-api` unit uses absolute paths). The root `sitecustomize.py` is not enough: Python looks for it before it adds the current folder to the path. A local venv may hide this with a `.pth` file that points at `BE/`, and `pyproject.toml` sets the pytest `pythonpath`.
 
 ```bash
 # Backend tests (unittest, fully offline: fakes for LLM, SQL, embedder and Pinecone)
@@ -59,7 +59,7 @@ python -m legacy_ingest [--dry-run] [--mode refresh|upsert] [--csv PATH] [--forc
 
 `docs/instructions.md` covers starting the MSSQL container (`mcr.microsoft.com/mssql/server:2022-latest` in Docker, locally or on EC2), checking the load (expected 32,065 rows) and the systemd setup. After loading, run `BE/sql/setup_security_view.sql` as admin to create the view, the RO login and the audit table.
 
-**CI/CD** (`.github/workflows/deploy.yml`): on push/PR to `main` it runs the backend unittest suite, then `npm ci && npm test && npm run build` in `FE/`. **Merging to `main` deploys:** every push to `main` whose checks pass (and a manual `workflow_dispatch` run on `main`) deploys to EC2 over SSH, using the `FDE-YT-Cold` environment unless the manual run names another. It does a git pull, installs deps, builds FE, and restarts the `fde-api` and `streamlit` systemd units. The script stops at the first failed command (`set -e`), except that a failed restart is ignored (`|| true`), so a green run doesn't prove the services came back. A restart drops in-memory sessions, including pending approvals.
+**CI/CD** (`.github/workflows/deploy.yml`): on push/PR to `main` it runs the backend unittest suite, then `npm ci && npm test && npm run build` in `FE/`. **Merging to `main` deploys:** every push to `main` whose checks pass (and a manual `workflow_dispatch` run on `main`) deploys to EC2 over SSH, using the `FDE-YT-Cold` environment unless the manual run names another. It does a fast-forward git pull, installs deps, builds FE (`npm ci`), restarts `fde-api` (`deploy/fde-api.service`), waits for `/healthz` and checks `/readyz`, then restarts `streamlit`. The script stops at the first failed command (`set -e`), so a green run means the API is up and can read telemetry; only the `streamlit` restart is ignored on failure (`|| true`). There is no rollback: a failed check leaves the new code in place. Deploy logs are public, so don't print service logs or secrets. A restart drops in-memory sessions, including pending approvals.
 
 ## Data & security model
 
@@ -98,7 +98,7 @@ The previous single ReAct loop remains for comparison (`--legacy-react`) and its
 
 ### `api/server.py`: Backend-for-Frontend gateway
 - `create_app(agent_streamer=, audit_writer=, audit_reader=)` lets you inject fakes (see `tests/test_fe_api.py`). The module-level `app` is for uvicorn.
-- Endpoints: `GET /healthz`, `GET /api/v1/meta` (active LLM and model, embeddings, observability status, `config_errors`), `GET /api/v1/traces`, `POST /api/v1/session/purge` (deletes the old thread's checkpoint, returns a new id), `POST /api/v1/dispatch/stream` (SSE), `POST /api/v1/audit/logs` (admin creds in body). `/meta` and purge are built by shared functions (`build_meta_payload`, `build_purge_payload`) so both servers return the same thing.
+- Endpoints: `GET /healthz` (process is up), `GET /readyz` (agent builds and the telemetry view can be read; 503 with error types only), `GET /api/v1/meta` (active LLM and model, embeddings, observability status, `config_errors`), `GET /api/v1/traces`, `POST /api/v1/session/purge` (deletes the old thread's checkpoint, returns a new id), `POST /api/v1/dispatch/stream` (SSE), `POST /api/v1/audit/logs` (admin creds in body). `/meta` and purge are built by shared functions (`build_meta_payload`, `build_purge_payload`) so both servers return the same thing.
 - Audit: each dispatch run writes the operator prompt (`user_input` / `Dispatcher`) and then one row per step through `SqlAuditLedgerExporter`, using the telemetry engine from `AgentSettings` (configured database, `AUDIT_ENABLED`, `AUDIT_TABLE`). The audit reader uses the same server and database with the admin credentials from the request.
 - SSE event types: `status`, `tool_input`, `tool_output`, `evidence`, `draft_start`, `token`, `verification`, `degraded`, `model_decision`, `approval_required`, `approval_recorded`, `final_answer`, `error`, `done` (with `outcome`: `complete` | `awaiting_approval` | `error`). Tokens, `draft_start` and `status` are streamed only; every other step is audited. The FE applies them in `features/dispatch/hooks/dispatchEvents.js`, so change both sides together.
 - `POST /api/v1/dispatch/approve` (`{session_id, decision: approve|reject, by, note}`) resumes a run paused at the action gate and streams the rest as SSE; the decision is audited first (`approval` / `Dispatcher`). There is no authentication: `by` is whatever the client sends.
@@ -146,6 +146,7 @@ The session id (`thread_id`) persists across reloads and can be purged with one 
 - `test_dispatch_resilience.py`: the failure policy (retries, fallbacks, gaps, whole-graph outage).
 - `test_dispatch_model_decisions.py`: the code/shadow/model modes and each guardrail.
 - `test_aggregate_evidence.py`: aggregate rows never count as fresh and can't give an all-clear.
+- `test_readiness.py`: `/readyz` on both servers.
 - `test_sop_rules.py`: SOP rule regressions for F7 (weather never triggers; congestion only from telemetry in the LB/LA area).
 - `test_legacy_ingest.py`: the loader.
 - `review_findings_test.py` and `open_findings/`: regression tests for code-review findings (reviews in `materials/code-review/`).
