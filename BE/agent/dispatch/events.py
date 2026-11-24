@@ -36,6 +36,7 @@ class EvidenceEvent(TypedDict):
     historical: int
     triggers: list[str]
     historical_breaches: int
+    synthetic: int  # telemetry records from the synthetic table
     gaps: list[str]
 
 

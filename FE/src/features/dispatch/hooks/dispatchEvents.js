@@ -83,7 +83,7 @@ export function applyDispatchEvent(message, { type, data = {} }) {
     case "approval_required":
       return {
         ...base,
-        approval: { state: "pending", actions: data.actions || [], verified: data.verified },
+        approval: { state: "pending", actions: data.actions || [], verified: data.verified, synthetic: Boolean(data.synthetic) },
         statusLabel: "Awaiting dispatcher approval",
       };
 

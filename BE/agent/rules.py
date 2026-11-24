@@ -55,6 +55,13 @@ class SopRule:
     check: Callable[[dict], str | None]  # returns a human summary when breached, else None
     view_field: str  # the semantic view's name for sop_field
     direction: str  # ">" or "<"
+    sql_predicate: str  # the same condition over the view's columns, for rollups (tests compare the two)
+    sql_scope: str | None = None  # readings the rule can apply to at all; None = every reading
+
+
+def _ports_area_sql() -> str:
+    lat_min, lat_max, lon_min, lon_max = PORTS_LB_LA_BOX
+    return f"Latitude BETWEEN {lat_min} AND {lat_max} AND Longitude BETWEEN {lon_min} AND {lon_max}"
 
 
 def _temp_breach(f: dict) -> str | None:
@@ -87,13 +94,17 @@ RULES: tuple[SopRule, ...] = (
     # Telemetry has no ETA field, so code cannot confirm that condition and does not permit it;
     # add it here once an ETA delay column exists in the view.
     SopRule("TEMP_BREACH", f"{SOP_DOC} §1 Critical Breach", "IOT_TEMP_VAL_C", 4.0,
-            ("restart_cooling",), _temp_breach, "Current_Temperature_C", ">"),
+            ("restart_cooling",), _temp_breach, "Current_Temperature_C", ">",
+            "Current_Temperature_C > 4.0"),
     SopRule("TEMP_BELOW_RANGE", f"{SOP_DOC} §1 Fresh Perishables range", "IOT_TEMP_VAL_C", 0.0,
-            (), _temp_below_range, "Current_Temperature_C", "<"),
+            (), _temp_below_range, "Current_Temperature_C", "<",
+            "Current_Temperature_C < 0.0"),
     SopRule("PORT_CONGESTION", f"{SOP_DOC} §2 Port of Long Beach / LA", "PRT_CNG_LVL", 7.0,
-            ("divert_inland_empire",), _port_congestion, "Port_Congestion_Level", ">"),
+            ("divert_inland_empire",), _port_congestion, "Port_Congestion_Level", ">",
+            f"Port_Congestion_Level > 7.0 AND {_ports_area_sql()}", _ports_area_sql()),
     SopRule("HIGH_RISK_DELAY", f"{SOP_DOC} §3 Risk Classification Triggers", "DELAY_PROB_DEC", 0.65,
-            ("escalate_tier2",), _high_risk_delay, "Delay_Probability", ">"),
+            ("escalate_tier2",), _high_risk_delay, "Delay_Probability", ">",
+            "Risk_Classification LIKE 'High%' AND Delay_Probability > 0.65"),
 )
 
 THRESHOLDS = tuple(sorted({r.threshold for r in RULES}))
@@ -120,6 +131,7 @@ def evaluate_rules(ledger: list[dict[str, Any]]) -> tuple[list[dict], list[dict]
                 "field": rule.view_field,
                 "direction": rule.direction,
                 "freshness": rec.get("freshness"),
+                "data_source": rec.get("data_source"),
                 "actions": list(rule.actions),
                 "high_stakes": any(a in HIGH_STAKES_ACTIONS for a in rule.actions),
             }

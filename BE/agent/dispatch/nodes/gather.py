@@ -41,9 +41,12 @@ def gather_telemetry(payload: dict, runtime: Runtime[DispatchContext]) -> dict:
     ctx, emit = runtime.context, runtime.stream_writer
     sql = payload.get("sql", "")
     emit({"type": "tool_input", "name": "query_telemetry_db", "args": {"sql_query": sql}})
-    result: dict = {"source": "telemetry", "status": "ok", "columns": [], "rows": [], "error": None, "aggregated": is_aggregate_sql(sql)}
+    result: dict = {"source": "telemetry", "status": "ok", "columns": [], "rows": [], "error": None, "aggregated": is_aggregate_sql(sql),
+                    "sql": sql, "rollup": payload.get("rollup")}
+    # Only coded rollups set max_rows; a model-written query keeps SQL_MAX_ROWS.
+    max_rows = payload.get("max_rows") or ctx.settings.sql_max_rows
     try:
-        columns, rows = fetch_telemetry_rows(ctx.resources.engine(), sql, max_rows=ctx.settings.sql_max_rows)
+        columns, rows = fetch_telemetry_rows(ctx.resources.engine(), sql, max_rows=max_rows)
         result["columns"] = columns
         result["rows"] = [[plain(v) for v in row] for row in rows]
         if rows:

@@ -18,7 +18,7 @@ from agent.dispatch.consult import consult, emit_decision
 from agent.dispatch.context import DispatchContext
 from agent.dispatch.schemas import Assessment, Finding
 from agent.dispatch.state import DispatchState
-from agent.evidence import AGGREGATED, FRESH, fmt_value, render_ledger
+from agent.evidence import AGGREGATED, FRESH, SYNTHETIC, fmt_value, render_ledger, source_counts
 from agent.llm import LLMTask
 from agent.rules import PORTS_LB_LA_BOX, RULES, evaluate_rules
 
@@ -69,6 +69,7 @@ def check_finding(f: Finding, by_id: dict[str, dict], coded: set[tuple]) -> tupl
         "field": f.field,
         "direction": direction,
         "freshness": rec["freshness"],
+        "data_source": rec.get("data_source"),
         "actions": [],
         "high_stakes": False,
     }, None
@@ -89,6 +90,7 @@ def assess(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
             "historical": sum(1 for r in records if r["source"] == "telemetry" and r["freshness"] not in (FRESH, AGGREGATED)),
             "triggers": [f"{t['rule']} [{t['evidence']}]" for t in triggers],
             "historical_breaches": len(historical),
+            "synthetic": source_counts(records).get(SYNTHETIC, 0),
             "gaps": [*(state.get("gaps") or []), *gaps],
             "notes": state.get("notes") or [],
         }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from agent.intent import Intent, area_sql
+from agent.intent import Intent, area_sql, period_sql
 
 HISTORY_MESSAGES = 4
 
@@ -18,7 +18,8 @@ You plan data retrieval for a cold-chain control tower. Call the tools needed to
 
 <tools>
 - query_telemetry_db: one read-only T-SQL SELECT against FDE_VIEWS.VW_ACTIVE_FLEET.
-  Columns: Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index.
+  Columns: Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index, Data_Source.
+  Data_Source is 'historical' (real readings, 2021-01 to 2024-08) or 'synthetic' (generated, later dates).
 - fetch_corridor_conditions: measured and forecast weather for a latitude and longitude.
 - search_compliance_sop: search the SOP knowledge base.
 </tools>
@@ -27,8 +28,9 @@ You plan data retrieval for a cold-chain control tower. Call the tools needed to
 Apply these checks in order. Each one that matches adds a tool call:
 PRIORITY 1: the question asks about shipments, temperatures, risk, delay or congestion -> query_telemetry_db.
   - Counts, averages, minimums, maximums or comparisons: compute them in SQL (COUNT, AVG, MIN, MAX with GROUP BY) and include MAX(Timestamp) AS Timestamp. The answer step may not compute numbers itself.
-  - Individual readings: SELECT TOP {max_rows}, always include Timestamp, ORDER BY Timestamp DESC.
-  - Apply the area and temperature filters given in the human turn as WHERE conditions, exactly as written.
+  - Individual readings: SELECT TOP {max_rows}, always include Timestamp and Data_Source, ORDER BY Timestamp DESC.
+  - Never mix data sources: in every aggregate query, either GROUP BY Data_Source (and select it) or filter Data_Source = 'historical'. Never rename the column.
+  - Apply the area, period and temperature filters given in the human turn as WHERE conditions, exactly as written.
 PRIORITY 2: coordinates are given in the human turn -> fetch_corridor_conditions for those coordinates.
 PRIORITY 3: the question asks what to do, or about a threshold, rule or procedure -> search_compliance_sop with a short query in the SOP's words.
 If nothing matches, call search_compliance_sop with the question.
@@ -37,11 +39,11 @@ If nothing matches, call search_compliance_sop with the question.
 <examples>
 <example>
 Question: "What is the average temperature per risk class?"
-Calls: query_telemetry_db(SELECT Risk_Classification, AVG(Current_Temperature_C) AS Avg_Temperature_C, COUNT(*) AS Shipment_Count, MAX(Timestamp) AS Timestamp FROM FDE_VIEWS.VW_ACTIVE_FLEET GROUP BY Risk_Classification)
+Calls: query_telemetry_db(SELECT Data_Source, Risk_Classification, AVG(Current_Temperature_C) AS Avg_Temperature_C, COUNT(*) AS Shipment_Count, MAX(Timestamp) AS Timestamp FROM FDE_VIEWS.VW_ACTIVE_FLEET GROUP BY Data_Source, Risk_Classification)
 </example>
 <example>
 Question: "How many High Risk shipments are near Long Beach?" with coordinates 33.77, -118.19
-Calls: query_telemetry_db(SELECT COUNT(*) AS Shipment_Count, MAX(Timestamp) AS Timestamp FROM FDE_VIEWS.VW_ACTIVE_FLEET WHERE Risk_Classification = 'High Risk' AND <area filter>),
+Calls: query_telemetry_db(SELECT Data_Source, COUNT(*) AS Shipment_Count, MAX(Timestamp) AS Timestamp FROM FDE_VIEWS.VW_ACTIVE_FLEET WHERE Risk_Classification = 'High Risk' AND <area filter> GROUP BY Data_Source),
        fetch_corridor_conditions(latitude=33.77, longitude=-118.19)
 </example>
 </examples>
@@ -56,6 +58,7 @@ PLANNER_HUMAN = (
     "Known place: {place}\n"
     "Coordinates: {coordinates}\n"
     "Area filter: {area_filter}\n"
+    "Period filter: {period_filter}\n"
     "Temperature filter: {temperature_filter}\n"
     "Routing reason: {intent_reason}"
 )
@@ -84,6 +87,7 @@ def intent_variables(intent: Intent, *, half_width_deg: float) -> dict[str, str]
         "place": intent.place or "none",
         "coordinates": coordinates,
         "area_filter": area,
+        "period_filter": " AND ".join(period_sql(intent)) or "none",
         "temperature_filter": " AND ".join(temps) or "none",
         "intent_reason": intent.reason,
     }

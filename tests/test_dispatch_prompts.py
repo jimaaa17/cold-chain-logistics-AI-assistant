@@ -66,7 +66,7 @@ class TestTemplateVariables(unittest.TestCase):
     def test_planner_variables(self):
         self.assertEqual(
             set(planner_prompt.input_variables),
-            {"question", "max_rows", "place", "coordinates", "area_filter", "temperature_filter", "intent_reason"},
+            {"question", "max_rows", "place", "coordinates", "area_filter", "period_filter", "temperature_filter", "intent_reason"},
         )
         self.assertEqual(planner_prompt.optional_variables, ["history"])
 

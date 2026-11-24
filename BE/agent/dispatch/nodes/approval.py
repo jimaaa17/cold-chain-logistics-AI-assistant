@@ -6,6 +6,7 @@ from langgraph.types import interrupt
 
 from agent.dispatch.context import DispatchContext
 from agent.dispatch.state import DispatchState
+from agent.evidence import SYNTHETIC
 from agent.rules import ACTION_LABELS
 
 
@@ -19,12 +20,14 @@ def action_gate(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict
         for t in state.get("triggers", [])
         for action in t["actions"]
     }
+    synthetic = {r["id"] for r in state.get("ledger", []) if r.get("data_source") == SYNTHETIC}
     request = {
         "actions": [
-            {**a, "label": ACTION_LABELS[a["action"]], "trigger": reasons.get((a["evidence"], a["action"]), "")}
+            {**a, "synthetic": a["evidence"] in synthetic, "label": ACTION_LABELS[a["action"]], "trigger": reasons.get((a["evidence"], a["action"]), "")}
             for a in high
         ],
         "verified": bool(v.get("passed")),
+        "synthetic": any(a["evidence"] in synthetic for a in high),
     }
     decision = interrupt(request) or {}
     verdict = str(decision.get("decision", "")).lower()

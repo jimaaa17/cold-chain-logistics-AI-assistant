@@ -24,6 +24,11 @@ function ApprovalPanel({ approval, disabled, onDecide }) {
           </li>
         ))}
       </ul>
+      {approval.synthetic && (
+        <p data-testid="approval-synthetic" className="text-xs text-amber-300">
+          Based on synthetic readings, not a real shipment.
+        </p>
+      )}
       {pending && approval.verified === false && (
         <p className="text-xs text-amber-300">
           The answer failed the automatic check. Review the evidence before approving.
@@ -111,6 +116,16 @@ export function MessageBubble({ entry, isStreaming = false, onDecideApproval }) 
             className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs font-mono text-amber-300"
           >
             ⚠️ OFFLINE DEMO: canned sample data (AGENT_OFFLINE_DEMO). Not live telemetry or SOP retrieval.
+          </div>
+        )}
+
+        {!isUser && entry.evidence?.synthetic > 0 && (
+          <div
+            role="status"
+            data-testid="synthetic-banner"
+            className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+          >
+            Synthetic data: {entry.evidence.synthetic} of the records used are generated, not real shipments.
           </div>
         )}
 
