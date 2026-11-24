@@ -4,22 +4,22 @@
 - Create EC2 instance > docker container for SQL Server > mcr.microsoft.com/mssql/server:2022-latest
 - Spin up the Legacy MSSQL Server
 ```
-docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=FdeEnterprisePass123!" -p 1433:1433 --name legacy-mssql -d mcr.microsoft.com/mssql/server:2022-latest
+docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=<your-sa-password>" -p 1433:1433 --name legacy-mssql -d mcr.microsoft.com/mssql/server:2022-latest
 
 # or multi-line in windows 
-docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=FdeEnterprisePass123!" ^
+docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=<your-sa-password>" ^
    -p 1433:1433 --name legacy-mssql ^
    -d mcr.microsoft.com/mssql/server:2022-latest
 
 # or multi-line unix
-docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=FdeEnterprisePass123!" \
+docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=<your-sa-password>" \
    -p 1433:1433 --name legacy-mssql \
    -d mcr.microsoft.com/mssql/server:2022-latest
 
 # or multi-line with volume inside EC2
 docker run -v mssql_data:/var/opt/mssql \
   -e "ACCEPT_EULA=Y" \
-  -e "MSSQL_SA_PASSWORD=FdeEnterprisePass123!" \
+  -e "MSSQL_SA_PASSWORD=<your-sa-password>" \
   -p 1433:1433 \
   --name legacy-mssql \
   -d mcr.microsoft.com/mssql/server:2022-latest
@@ -58,10 +58,10 @@ Download : https://github.com/microsoft/azuredatastudio
     Trust server certificate: 🟩 Check this box / turn it ON (Crucial for Docker)
     Authentication type*: SQL Login
     User name*: sa
-    Password*: FdeEnterprisePass123!
+    Password*: the value of SQL_ADMIN_PASSWORD in .env
     Save Password: 🟩 Check this box
     Database name: Type master (or leave it on "Select a database")
-    Encrypt: ⚠️ Change this from Mandatory to Optional (or False)
+    Encrypt: Mandatory (with Trust server certificate on)
     ```
 - Right-click the connected `legacy-mssql` profile (or `master` database) and select **New Query** (or press `Cmd+N` / `Ctrl+N` and set language mode to `SQL`)
 - In the query window, run the following queries (`Cmd+Shift+E` on macOS / `Ctrl+Shift+E` on Windows) to verify the connection and ingested data:
@@ -87,7 +87,7 @@ Download : https://github.com/microsoft/azuredatastudio
 ```
 docker run -v mssql_data:/var/opt/mssql \
   -e "ACCEPT_EULA=Y" \
-  -e "MSSQL_SA_PASSWORD=FdeEnterprisePass123!" \
+  -e "MSSQL_SA_PASSWORD=<your-sa-password>" \
   -p 1433:1433 \
   --name legacy-mssql \
   -d mcr.microsoft.com/mssql/server:2022-latest
@@ -105,6 +105,13 @@ docker run -v mssql_data:/var/opt/mssql \
 
 - Click on file: scripts/setup_security_view.sql
 - VS-code will show you start button directly on top else run like we were running the commands previously.
+- The script gives `USR_FDE_RO` a random password. Set a usable one, which also saves it to `.env`:
+  ```
+  python scripts/rotate_agent_password.py          # show the plan, change nothing
+  python scripts/rotate_agent_password.py --yes    # rotate
+  ```
+  Run the same command to rotate it later, then copy `SQL_AGENT_PASSWORD` to every machine that uses it
+  and restart `fde-api`. Never put a real password in this file: the repository is public.
 - Once done, create a new connection now with Agent-Profile
 
 ```
@@ -116,10 +123,10 @@ docker run -v mssql_data:/var/opt/mssql \
 * Trust server Certifficate: Check this box/Turn it ON
 * Authentication type*: SQL Login
 * User name*: USR_FDE_RO
-* Password*: AgentPassword2026!
+* Password*: the value of SQL_AGENT_PASSWORD in .env
 * Save Password: Check this box/Turn it ON
 * Database name: Type master(or Click "Select a database" and Select master)
-* Encrypt: Change this from Mandatory to Optional (or False)
+* Encrypt: Mandatory (with Trust server certificate on)
 ```
 
 Connect and test below commands:

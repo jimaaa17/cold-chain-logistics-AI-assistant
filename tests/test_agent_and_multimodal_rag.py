@@ -438,7 +438,9 @@ class TestRefactoredAgentBackend(RagTestCase):
         )
 
     def test_agent_cli_dry_run_and_invalid_config_exit_codes(self):
-        self.assertEqual(agent_cli.main(["--dry-run"]), 0)
+        settings = AgentSettings(_env_file=None, sql_agent_password="test-pass")
+        with mock.patch.object(agent_cli, "get_agent_settings", return_value=settings):
+            self.assertEqual(agent_cli.main(["--dry-run"]), 0)
         self.assertEqual(agent_cli.main(["--dry-run", "--llm", "INVALID_PROVIDER"]), 2)
 
     def test_prototype_src_and_legacy_sop_script_remain_untouched(self):
