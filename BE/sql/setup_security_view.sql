@@ -7,9 +7,26 @@
 CREATE SCHEMA FDE_VIEWS;
 GO -- GO only works inside Microsoft terminal tools.
 
--- 2. Create the Semantic View (Translating legacy junk to clean English)
+-- 2. Create the (empty) synthetic table and the Semantic View (Translating legacy junk to clean English)
+IF OBJECT_ID(N'dbo.TBL_SC_FLEET_SYNTH_RAW', N'U') IS NULL
+CREATE TABLE [dbo].[TBL_SC_FLEET_SYNTH_RAW] (
+    [TS_UTC] DATETIME2(0) NOT NULL CONSTRAINT [PK_TBL_SC_FLEET_SYNTH_RAW] PRIMARY KEY CLUSTERED,
+    [V_LAT] FLOAT NOT NULL,
+    [V_LON] FLOAT NOT NULL,
+    [IOT_TEMP_VAL_C] FLOAT NOT NULL,
+    [CGO_COND_CD] FLOAT NOT NULL,
+    [RISK_CLS_TXT] VARCHAR(20) NOT NULL,
+    [DELAY_PROB_DEC] FLOAT NOT NULL,
+    [PRT_CNG_LVL] FLOAT NOT NULL,
+    [RT_RSK_IDX] FLOAT NOT NULL,
+    [SYS_INGEST_FLAG] CHAR(1) NOT NULL CONSTRAINT [DF_TBL_SC_FLEET_SYNTH_RAW_FLAG] DEFAULT 'Y',
+    CONSTRAINT [CK_TBL_SC_FLEET_SYNTH_RAW_RISK] CHECK ([RISK_CLS_TXT] IN ('Low Risk', 'Moderate Risk', 'High Risk')),
+    CONSTRAINT [CK_TBL_SC_FLEET_SYNTH_RAW_FLAG] CHECK ([SYS_INGEST_FLAG] IN ('Y', 'N'))
+);
+GO
+
 CREATE VIEW FDE_VIEWS.VW_ACTIVE_FLEET AS
-SELECT 
+SELECT
     TS_UTC AS [Timestamp],
     V_LAT AS [Latitude],
     V_LON AS [Longitude],
@@ -18,8 +35,22 @@ SELECT
     RISK_CLS_TXT AS [Risk_Classification],
     DELAY_PROB_DEC AS [Delay_Probability],
     PRT_CNG_LVL AS [Port_Congestion_Level],
-    RT_RSK_IDX AS [Route_Risk_Index]
-FROM dbo.TBL_SC_FLEET_HIST_RAW;
+    RT_RSK_IDX AS [Route_Risk_Index],
+    CAST('historical' AS VARCHAR(10)) AS [Data_Source]
+FROM dbo.TBL_SC_FLEET_HIST_RAW
+UNION ALL
+SELECT
+    TS_UTC,
+    V_LAT,
+    V_LON,
+    CAST(IOT_TEMP_VAL_C AS FLOAT),
+    CGO_COND_CD,
+    RISK_CLS_TXT,
+    DELAY_PROB_DEC,
+    PRT_CNG_LVL,
+    RT_RSK_IDX,
+    CAST('synthetic' AS VARCHAR(10))
+FROM dbo.TBL_SC_FLEET_SYNTH_RAW;
 GO
 
 -- 3. Create a strict Read-Only Login and User for the AI Agent
@@ -35,6 +66,7 @@ GO
 -- 4. Grant access ONLY to the semantic view, explicitly denying everything else
 GRANT SELECT ON FDE_VIEWS.VW_ACTIVE_FLEET TO USR_FDE_RO;
 DENY SELECT ON dbo.TBL_SC_FLEET_HIST_RAW TO USR_FDE_RO;
+DENY SELECT ON dbo.TBL_SC_FLEET_SYNTH_RAW TO USR_FDE_RO;
 DENY INSERT, UPDATE, DELETE, ALTER ON SCHEMA::dbo TO USR_FDE_RO;
 GO
 

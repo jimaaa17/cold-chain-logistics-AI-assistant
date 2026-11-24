@@ -133,6 +133,8 @@ def _run_turn(graph, prompt: str, session_id: str, decision: str | None) -> None
     if pending is None:
         return
     print("\nApproval required:")
+    if pending.get("synthetic"):
+        print("  (based on synthetic readings, not a real shipment)")
     for action in pending.get("actions", []):
         print(f"  - {action['label']} [{action['evidence']}] because {action.get('trigger', '')}")
     if decision is None and sys.stdin.isatty():

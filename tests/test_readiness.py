@@ -74,7 +74,7 @@ class TestReadiness(unittest.TestCase):
     def test_ready_when_the_view_can_be_read(self):
         engine = _Engine()
         self.assertEqual(self.get_both(return_value=_graph(engine)), (200, {"status": "ready", "telemetry_db": "ok"}))
-        self.assertEqual(engine.statements[0], "SELECT TOP 1 * FROM FDE_VIEWS.VW_ACTIVE_FLEET")
+        self.assertEqual(engine.statements[0], "SELECT TOP 1 Data_Source FROM FDE_VIEWS.VW_ACTIVE_FLEET")
 
     def test_database_failure_is_503_without_details(self):
         status, body = self.get_both(return_value=_graph(_Engine(ValueError(f"login failed {SECRET}"))))

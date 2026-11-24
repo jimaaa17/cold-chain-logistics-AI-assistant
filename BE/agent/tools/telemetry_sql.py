@@ -117,7 +117,8 @@ def make_telemetry_sql_tool(
         """Executes a SQL SELECT query against the FDE_VIEWS.VW_ACTIVE_FLEET view.
         Columns available:
         Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code,
-        Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index.
+        Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index,
+        Data_Source ('historical' = real readings, 'synthetic' = generated; never mix them).
         Always write standard T-SQL queries."""
         try:
             validated = validate_readonly_select(sql_query)

@@ -13,7 +13,7 @@ from agent.intent import classify_intent
 def intake(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
     human = [m for m in state.get("messages", []) if isinstance(m, HumanMessage)]
     question = text_of(human[-1].content) if human else ""
-    intent = classify_intent(question)
+    intent = classify_intent(question, runtime.context.clock())
     runtime.stream_writer({"type": "status", "phase": "routing", "label": f"Route: {intent.kind}", "intent": intent.kind})
     return {  # resets every per-turn field; `gathered: None` clears the fan-in reducer
         "question": question,

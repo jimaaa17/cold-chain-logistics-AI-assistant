@@ -29,6 +29,18 @@ describe("applyDispatchEvent", () => {
     expect(done.state).toBe("complete");
   });
 
+  it("keeps the synthetic-data flags on the evidence and the approval request", () => {
+    const action = { action: "divert_inland_empire", evidence: "T1", label: "Divert", synthetic: true };
+    const msg = play([
+      ["evidence", { records: 3, triggers: [], synthetic: 2 }],
+      ["approval_required", { actions: [action], verified: true, synthetic: true }],
+    ]);
+    expect(msg.evidence.synthetic).toBe(2);
+    expect(msg.approval.synthetic).toBe(true);
+    const real = play([["approval_required", { actions: [action], verified: true }]]);
+    expect(real.approval.synthetic).toBe(false);
+  });
+
   it("resets the draft when the verifier sends it back for a retry", () => {
     const msg = play([
       ["draft_start", { attempt: 1 }],
