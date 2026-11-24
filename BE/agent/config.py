@@ -16,6 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+class MissingSqlPasswordError(ValueError):
+    """`SQL_AGENT_PASSWORD` is not set, so the telemetry database can't be reached."""
+
+
 class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
@@ -50,7 +54,9 @@ class AgentSettings(BaseSettings):
     sql_server_port: int = Field(default=1433, gt=0, le=65535)
     sql_server_database: str = "master"
     sql_agent_user: str = "USR_FDE_RO"
-    sql_agent_password: SecretStr = SecretStr("AgentPassword2026!")
+    # No default: a shared default would be a known password. Checked when a connection is needed
+    # (`require_sql_password`), so everything that uses no database still works without it.
+    sql_agent_password: SecretStr | None = None
     sql_odbc_driver: str = "ODBC Driver 18 for SQL Server"
     sql_encrypt: bool = False
     sql_trust_server_certificate: bool = True
@@ -111,11 +117,17 @@ class AgentSettings(BaseSettings):
                 self.agent_llm = "OLLAMA"
         return self
 
+    def require_sql_password(self) -> str:
+        password = self.sql_agent_password.get_secret_value() if self.sql_agent_password else ""
+        if not password:
+            raise MissingSqlPasswordError("SQL_AGENT_PASSWORD must be set (env or .env).")
+        return password
+
     def odbc_connection_string(self) -> str:
         """Build a brace-escaped ODBC connection string for the read-only agent role."""
         encrypt = "yes" if self.sql_encrypt else "no"
         trust = "yes" if self.sql_trust_server_certificate else "no"
-        pwd = self.sql_agent_password.get_secret_value()
+        pwd = self.require_sql_password()
         return (
             f"DRIVER={_brace_escape(self.sql_odbc_driver)};"
             f"SERVER={self.sql_server_host},{self.sql_server_port};"

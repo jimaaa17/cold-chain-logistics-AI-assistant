@@ -23,7 +23,12 @@ FROM dbo.TBL_SC_FLEET_HIST_RAW;
 GO
 
 -- 3. Create a strict Read-Only Login and User for the AI Agent
-CREATE LOGIN USR_FDE_RO WITH PASSWORD = 'AgentPassword2026!';
+-- The login gets a random password that nobody knows. Set a usable one afterwards with:
+--     python scripts/rotate_agent_password.py --yes
+DECLARE @pw NVARCHAR(128) = N'Aa1!' + CONVERT(NVARCHAR(64), CRYPT_GEN_RANDOM(24), 2);
+EXEC (N'CREATE LOGIN USR_FDE_RO WITH PASSWORD = ''' + @pw + N''';');
+GO
+
 CREATE USER USR_FDE_RO FOR LOGIN USR_FDE_RO;
 GO
 
