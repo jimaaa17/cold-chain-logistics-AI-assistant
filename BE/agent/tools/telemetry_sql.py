@@ -61,6 +61,19 @@ def create_telemetry_engine(settings: "AgentSettings") -> Engine:
     )
 
 
+def fetch_telemetry_rows(engine: Engine, sql_query: str, *, max_rows: int = 10) -> tuple[list[str], list[Any]]:
+    """Validated read-only query returning (columns, rows) for structured callers."""
+    validated_sql = validate_readonly_select(sql_query)
+
+    @with_retry(attempts=3, max_wait=2.0)
+    def _run() -> tuple[list[str], list[Any]]:
+        with engine.connect() as conn:
+            cursor = conn.execute(text(validated_sql))
+            return list(cursor.keys()), list(cursor.fetchmany(max_rows))
+
+    return _run()
+
+
 def execute_telemetry_query(engine: Engine, sql_query: str, *, max_rows: int = 10) -> str:
     validated_sql = validate_readonly_select(sql_query)
 

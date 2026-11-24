@@ -17,8 +17,10 @@ Use this exact response structure:
 Here's what I found for active shipments and the weather check:
 
 ## Local Weather / Corridor Conditions ([Lat], [Lon])
-* **External temp:** [Temp]°C | **Wind:** [Wind] km/h
-* **Corridor risk:** [Status note] — congestion index [Index]/10
+* **External temp:** [Temp]°C | **Wind:** [Wind] km/h (Open-Meteo, observed at [Time] UTC)
+* **Port congestion:** [Port_Congestion_Level from `query_telemetry_db`, or "not available"]
+
+Weather is context only: report the measured values exactly as `fetch_corridor_conditions` returns them. Never derive a congestion index, risk score or disruption label from weather; the SOP has no weather threshold, so weather alone never justifies a diversion. Port congestion comes only from the `Port_Congestion_Level` column.
 
 ## Shipments Near [Location] ([N] located)
 

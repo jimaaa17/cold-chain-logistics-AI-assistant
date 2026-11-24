@@ -1,0 +1,7 @@
+"""Reply for out-of-scope or too-vague questions. No LLM is called, so this is plain text, not a template."""
+
+CLARIFY_TEXT = (
+    'I can answer questions about refrigerated shipments, port congestion and SOP compliance. For '
+    'example: "Which shipments are above 4 °C near Long Beach?" or "What does the SOP require '
+    'when port congestion is high?"'
+)

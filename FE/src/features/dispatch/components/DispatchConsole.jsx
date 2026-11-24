@@ -7,6 +7,7 @@ export function DispatchConsole({
   messages,
   isStreaming,
   onSendPrompt,
+  onDecideApproval,
   onStopStream,
 }) {
   const [input, setInput] = useState("");
@@ -66,7 +67,14 @@ export function DispatchConsole({
             </p>
           </div>
         ) : (
-          messages.map((entry) => <MessageBubble key={entry.id} entry={entry} />)
+          messages.map((entry) => (
+            <MessageBubble
+              key={entry.id}
+              entry={entry}
+              isStreaming={isStreaming}
+              onDecideApproval={onDecideApproval}
+            />
+          ))
         )}
       </div>
 

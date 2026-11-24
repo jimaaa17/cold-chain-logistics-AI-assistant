@@ -38,6 +38,19 @@ export async function streamDispatchPrompt({ sessionId, prompt, onEvent, signal 
 }
 
 /**
+ * Sends the dispatcher's decision on a paused high-stakes action and streams the resumed run.
+ * @param {{ sessionId: string, decision: "approve" | "reject", note?: string, by?: string }} args
+ */
+export async function streamApprovalDecision({ sessionId, decision, note = "", by = "dispatcher", onEvent, signal }) {
+  return streamPostSSE(
+    `${API_BASE}/api/v1/dispatch/approve`,
+    { session_id: sessionId, decision, note, by },
+    onEvent,
+    signal
+  );
+}
+
+/**
  * Authenticates admin credentials server-side and retrieves FDE_VIEWS.AgentAuditLog records.
  */
 export async function fetchAuditTrail({

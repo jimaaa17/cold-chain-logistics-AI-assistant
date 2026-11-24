@@ -38,15 +38,43 @@ def _sse_frame(event_type: str, payload: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
 
+# Step types written to the audit ledger: type -> (node, tool name or None = use step["name"]).
+_AUDITED_STEPS: dict[str, tuple[str, Optional[str]]] = {
+    "tool_input": ("reasoner", None),
+    "tool_output": ("tools", None),
+    "evidence": ("ledger", "EvidenceLedger"),
+    "verification": ("verifier", "GroundingVerifier"),
+    "approval_required": ("action_gate", "ApprovalRequest"),
+    "approval_recorded": ("dispatcher", "ApprovalDecision"),
+    "final_answer": ("reasoner_final", "LLM Text Synthesis"),
+    # A model step fell back to code; compliance needs a record of every degraded answer.
+    "degraded": ("fallback", "DegradedStep"),
+    "model_decision": ("model", "ModelDecision"),
+}
+# Streamed to the UI only (too fine-grained or purely presentational to audit).
+_STREAM_ONLY_STEPS = {"token", "draft_start", "status"}
+
+
+def _audit_content(step_type: str, step: dict[str, Any]) -> str:
+    if step_type == "tool_input":
+        return json.dumps(step.get("args", {}))
+    if step_type in ("tool_output", "final_answer"):
+        return str(step.get("content", ""))
+    return json.dumps({k: v for k, v in step.items() if k not in ("type", "simulated", "node")}, default=str)
+
+
 def generate_dispatch_sse_frames(
     session_id: str,
     prompt: str,
     streamer_fn: Callable[[str, str], Iterable[dict[str, Any]]],
     writer_fn: Callable[[str, str, str, str], None],
+    *,
+    prompt_audit: tuple[str, str] = (PROMPT_AUDIT_NODE, PROMPT_AUDIT_TOOL),
 ) -> Iterable[str]:
     """
-    Pure generator that transforms LangGraph stream updates into SSE frames
-    and writes each execution trace to FDE_VIEWS.AgentAuditLog via writer_fn.
+    Pure generator that transforms workflow events into SSE frames and writes every audited step
+    to FDE_VIEWS.AgentAuditLog via writer_fn (plus a trace span). The run ends normally with either
+    a final answer or a pause for dispatcher approval; anything else is an error frame.
     """
     start_ts = time.perf_counter()
     trace_id = new_trace_id(session_id)
@@ -55,31 +83,25 @@ def generate_dispatch_sse_frames(
         "status",
         {
             "phase": "initializing",
-            "label": "🧠 Initializing Core Reasoner Node...",
+            "label": "Routing the question...",
             "session_id": session_id,
             "trace_id": trace_id,
         },
     )
-    final_emitted = False
+    outcome = "error"
     simulated_announced = False
     try:
-        # The operator's prompt is the first audit row of every turn (as in AgentOrchestrator.stream).
-        writer_fn(session_id, PROMPT_AUDIT_NODE, PROMPT_AUDIT_TOOL, prompt)
+        # The operator's input is the first audit row of every turn (as in AgentOrchestrator.stream).
+        writer_fn(session_id, prompt_audit[0], prompt_audit[1], prompt)
         bridge.record_span(
-            session_id,
-            PROMPT_AUDIT_NODE,
-            PROMPT_AUDIT_TOOL,
-            prompt,
-            trace_id=trace_id,
-            span_id=new_span_id(),
-            elapsed_ms=0,
+            session_id, prompt_audit[0], prompt_audit[1], prompt,
+            trace_id=trace_id, span_id=new_span_id(), elapsed_ms=0,
         )
         for step in streamer_fn(session_id, prompt):
-            elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
             step_type = step.get("type")
-            if step_type not in ("tool_input", "tool_output", "final_answer"):
+            if step_type not in _AUDITED_STEPS and step_type not in _STREAM_ONLY_STEPS:
                 continue
-            span_id = new_span_id()
+            elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
             simulated = bool(step.get("simulated"))
 
             if simulated and not simulated_announced:
@@ -95,43 +117,34 @@ def generate_dispatch_sse_frames(
                     },
                 )
 
-            if step_type == "tool_input":
-                node, tool_name = "reasoner", step["name"]
-                audit_content = json.dumps(step.get("args", {}))
-                payload = {"node": node, "name": tool_name, "args": step.get("args", {})}
-            elif step_type == "tool_output":
-                node, tool_name = "tools", step["name"]
-                audit_content = step.get("content", "")
-                payload = {"node": node, "name": tool_name, "content": audit_content}
-            else:
-                final_emitted = True
-                node, tool_name = "reasoner_final", "LLM Text Synthesis"
-                audit_content = step.get("content", "")
-                payload = {"node": node, "content": audit_content}
+            payload = {k: v for k, v in step.items() if k != "type"}
+            payload.update({"elapsed_ms": elapsed_ms, "trace_id": trace_id, "simulated": simulated})
+            if step_type in _STREAM_ONLY_STEPS:
+                yield _sse_frame(step_type, payload)
+                continue
 
+            node, fixed_tool = _AUDITED_STEPS[step_type]
+            tool_name = fixed_tool or str(step.get("name", "tool"))
+            span_id = new_span_id()
+            audit_content = _audit_content(step_type, step)
             if simulated:
                 audit_content = SIMULATED_AUDIT_PREFIX + audit_content
             writer_fn(session_id, node, tool_name, audit_content)
             bridge.record_span(
-                session_id,
-                node,
-                tool_name,
-                audit_content,
-                trace_id=trace_id,
-                span_id=span_id,
-                elapsed_ms=elapsed_ms,
+                session_id, node, tool_name, audit_content,
+                trace_id=trace_id, span_id=span_id, elapsed_ms=elapsed_ms,
             )
-            payload.update(
-                {
-                    "elapsed_ms": elapsed_ms,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
-                    "simulated": simulated,
-                }
-            )
+            payload.update({"node": node, "span_id": span_id})
+            if fixed_tool is None:
+                payload["name"] = tool_name
             yield _sse_frame(step_type, payload)
 
-        if not final_emitted:
+            if step_type == "final_answer":
+                outcome = "complete"
+            elif step_type == "approval_required":
+                outcome = "awaiting_approval"
+
+        if outcome == "error":
             yield _sse_frame(
                 "error",
                 {
@@ -140,16 +153,23 @@ def generate_dispatch_sse_frames(
                 },
             )
     except Exception as exc:
+        outcome = "error"
         yield _sse_frame(
             "error",
-            {"message": f"Orchestrator Runtime Error: {str(exc)}", "trace_id": trace_id},
+            {"message": f"Orchestrator Runtime Error: {_redact_secrets(str(exc))[:_MAX_ERROR_DETAIL]}", "trace_id": trace_id},
         )
     finally:
         total_ms = int((time.perf_counter() - start_ts) * 1000)
+        labels = {
+            "complete": "Incident Matrix Evaluation Complete",
+            "awaiting_approval": "Awaiting dispatcher approval",
+            "error": "Run ended with an error",
+        }
         yield _sse_frame(
             "done",
             {
-                "label": "Incident Matrix Evaluation Complete",
+                "label": labels[outcome],
+                "outcome": outcome,
                 "elapsed_ms": total_ms,
                 "trace_id": trace_id,
                 "simulated": simulated_announced,
@@ -342,7 +362,7 @@ _GRAPH_LOCK = threading.Lock()
 
 
 def _get_compiled_graph():
-    """Lazily builds and caches the LangGraph ReAct state machine (thread-safe, built once).
+    """Lazily builds and caches the agentic dispatch workflow (thread-safe, built once).
 
     On failure nothing is cached and the settings cache is cleared, so the next request retries
     the build. Values added to `.env` are then picked up; values already exported into the process
@@ -356,9 +376,9 @@ def _get_compiled_graph():
         if _ACTIVE_GRAPH is not None:  # another thread finished the build while we waited
             return _ACTIVE_GRAPH
         try:
-            from agent.graph import build_agent_graph
+            from agent.workflow import build_dispatch_workflow
 
-            graph = build_agent_graph()
+            graph = build_dispatch_workflow()
         except Exception as exc:
             _reset_settings_cache()
             err = _as_config_error(exc)
@@ -460,15 +480,14 @@ def _offline_fallback_streamer(session_id: str, prompt: str) -> Iterable[dict[st
 
 
 def default_agent_streamer(session_id: str, prompt: str) -> Iterable[dict[str, Any]]:
-    """Streams normalized trace events from the compiled LangGraph agent.
+    """Streams normalised events from the agentic dispatch workflow (agent.workflow).
 
     Config and runtime errors propagate so `generate_dispatch_sse_frames` emits an SSE `error`
     frame. The canned demo stream is only used when the graph can't be built AND AGENT_OFFLINE_DEMO
     is set outside production (UI work without keys).
     """
     try:
-        from langchain_core.messages import HumanMessage, ToolMessage
-        from agent.graph import format_message_content
+        from agent.workflow import iter_dispatch_events
 
         graph = _get_compiled_graph()
     except Exception as exc:
@@ -480,44 +499,56 @@ def default_agent_streamer(session_id: str, prompt: str) -> Iterable[dict[str, A
         if err is exc:
             raise
         raise err from exc
+    yield from iter_dispatch_events(graph, session_id=session_id, prompt=prompt)
 
-    thread_config = {"configurable": {"thread_id": session_id}}
-    events = graph.stream(
-        {"messages": [HumanMessage(content=prompt)]},
-        config=thread_config,
-        stream_mode="updates",
-    )
 
-    for event in events:
-        for node_name, node_state in event.items():
-            if node_name == "reasoner":
-                latest_msg = node_state["messages"][-1]
-                tool_calls = getattr(latest_msg, "tool_calls", None) or []
-                if tool_calls:
-                    for tc in tool_calls:
-                        yield {
-                            "type": "tool_input",
-                            "node": "reasoner",
-                            "name": tc["name"],
-                            "args": tc["args"],
-                        }
-                formatted_text = format_message_content(getattr(latest_msg, "content", ""))
-                if formatted_text and not tool_calls:
-                    yield {
-                        "type": "final_answer",
-                        "node": "reasoner_final",
-                        "name": "LLM Text Synthesis",
-                        "content": formatted_text,
-                    }
-            elif node_name == "tools":
-                for msg in node_state.get("messages", []):
-                    if isinstance(msg, ToolMessage) or getattr(msg, "type", "") == "tool":
-                        yield {
-                            "type": "tool_output",
-                            "node": "tools",
-                            "name": getattr(msg, "name", "tool"),
-                            "content": str(getattr(msg, "content", "")),
-                        }
+class ApprovalError(RuntimeError):
+    """The session has no action waiting for approval."""
+
+
+def normalise_decision(body: dict[str, Any]) -> dict[str, str]:
+    decision = str(body.get("decision") or "").strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise ValueError("decision must be 'approve' or 'reject'")
+    return {
+        "decision": decision,
+        "by": str(body.get("by") or "dispatcher").strip()[:80] or "dispatcher",
+        "note": str(body.get("note") or "").strip()[:500],
+    }
+
+
+def default_approval_streamer(session_id: str, decision: dict[str, str]) -> Iterable[dict[str, Any]]:
+    """Resumes a run paused at the action gate with the dispatcher's decision."""
+    from agent.workflow import iter_dispatch_events, pending_approval
+
+    graph = _get_compiled_graph()
+    request = pending_approval(graph, session_id)
+    if request is None:
+        raise ApprovalError("No action is waiting for approval in this session.")
+    yield {"type": "approval_recorded", **decision, "actions": request.get("actions", [])}
+    yield from iter_dispatch_events(graph, session_id=session_id, resume=decision)
+
+
+def prewarm_agent() -> dict[str, str]:
+    """Builds the workflow and loads models/clients before the first request. Never raises."""
+    if not _env_flag("AGENT_PREWARM", default=True):
+        return {"prewarm": "disabled"}
+    started = time.perf_counter()
+    try:
+        graph = _get_compiled_graph()
+        report = graph.dispatch_resources.warm()
+    except Exception as exc:
+        logger.warning("Pre-warm skipped: %s", _describe_config_error(exc))
+        return {"graph": f"failed: {type(exc).__name__}"}
+    logger.info("Pre-warm finished in %.1fs: %s", time.perf_counter() - started, report)
+    return report
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def default_session_purger(session_id: str) -> bool:
@@ -602,6 +633,8 @@ def create_app(
     audit_writer: Optional[Callable[[str, str, str, str], None]] = None,
     audit_reader: Optional[Callable[..., list[dict[str, Any]]]] = None,
     session_purger: Optional[Callable[[str], bool]] = None,
+    approval_streamer: Optional[Callable[[str, dict], Iterable[dict[str, Any]]]] = None,
+    prewarm: Optional[bool] = None,
 ):
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, HTTPException
@@ -612,6 +645,12 @@ def create_app(
     class DispatchStreamRequest(BaseModel):
         session_id: str = Field(..., min_length=1, description="Active operator thread_id")
         prompt: str = Field(..., min_length=1, description="Natural-language operator query")
+
+    class ApprovalRequest(BaseModel):
+        session_id: str = Field(..., min_length=1)
+        decision: str = Field(..., description="approve | reject")
+        by: Optional[str] = Field(default=None, max_length=80)
+        note: Optional[str] = Field(default=None, max_length=500)
 
     class SessionPurgeRequest(BaseModel):
         old_session_id: Optional[str] = None
@@ -627,10 +666,18 @@ def create_app(
     writer_fn = audit_writer or default_audit_writer
     reader_fn = audit_reader or default_audit_reader
     purger_fn = session_purger or default_session_purger
+    approval_fn = approval_streamer or default_approval_streamer
+    # Pre-warm only the real agent (tests inject fakes) unless told otherwise.
+    should_prewarm = (agent_streamer is None) if prewarm is None else prewarm
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.started_at = time.time()
+        app.state.prewarm = {}
+        if should_prewarm:
+            import asyncio
+
+            app.state.prewarm = await asyncio.to_thread(prewarm_agent)
         yield
 
     app = FastAPI(
@@ -684,6 +731,23 @@ def create_app(
     def stream_dispatch(req: DispatchStreamRequest):
         return StreamingResponse(
             generate_dispatch_sse_frames(req.session_id, req.prompt, streamer_fn, writer_fn),
+            media_type="text/event-stream",
+        )
+
+    @app.post("/api/v1/dispatch/approve")
+    def approve_dispatch(req: ApprovalRequest):
+        try:
+            decision = normalise_decision(req.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return StreamingResponse(
+            generate_dispatch_sse_frames(
+                req.session_id,
+                json.dumps(decision),
+                lambda sid, _prompt: approval_fn(sid, decision),
+                writer_fn,
+                prompt_audit=("approval", "Dispatcher"),
+            ),
             media_type="text/event-stream",
         )
 
@@ -810,6 +874,31 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
                     self.wfile.flush()
                 return
 
+            if parsed.path == "/api/v1/dispatch/approve":
+                session_id = str(body.get("session_id") or "")
+                try:
+                    if not session_id:
+                        raise ValueError("session_id is required")
+                    decision = normalise_decision(body)
+                except ValueError as exc:
+                    return self._send_json(422, {"detail": str(exc)})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                for frame in generate_dispatch_sse_frames(
+                    session_id,
+                    json.dumps(decision),
+                    lambda sid, _prompt: default_approval_streamer(sid, decision),
+                    default_audit_writer,
+                    prompt_audit=("approval", "Dispatcher"),
+                ):
+                    self.wfile.write(frame.encode("utf-8"))
+                    self.wfile.flush()
+                return
+
             if parsed.path == "/api/v1/audit/logs":
                 try:
                     rows = default_audit_reader(
@@ -835,6 +924,7 @@ def make_stdlib_server(host: str = "127.0.0.1", port: int = 8000):
 def run_stdlib_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     """Zero-dependency HTTP/SSE server for running FE/ + BFF endpoints in any Python environment."""
     server = make_stdlib_server(host, port)
+    prewarm_agent()
     print(f"🚀 FDE Control Tower (FE + BFF) listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 

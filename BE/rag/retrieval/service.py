@@ -69,6 +69,11 @@ class RetrievalService:
         vector = list(self._embed_cached(normalised))
         return [m for m in self._store.query(vector, k, metadata_filter) if m.score >= threshold]
 
+    def warm_up(self) -> None:
+        """Runs one query embedding so model weights, tokenizer and inference kernels are loaded
+        before the first real request (called at API startup). Not cached as a real query."""
+        self._embedder.embed_query("cold-chain warm-up probe")
+
     def readiness(self) -> dict[str, Any]:
         """Raises if Pinecone is unreachable; used by the /readyz probe."""
         return {

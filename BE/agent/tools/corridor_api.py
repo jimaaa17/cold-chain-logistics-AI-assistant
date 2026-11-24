@@ -1,4 +1,4 @@
-"""Live corridor weather and congestion conditions tool with retries and graceful degradation (TDD 2.2)."""
+"""Corridor weather tool (Open-Meteo): measured observations only, with retries and graceful degradation."""
 from __future__ import annotations
 
 import logging
@@ -15,34 +15,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def fetch_corridor_telemetry(
+class CorridorRequestError(ValueError):
+    """Invalid coordinates or day window (reported to the caller, never retried)."""
+
+
+def fetch_corridor_observations(
     latitude: float,
     longitude: float,
     *,
     client: httpx.Client,
     api_url: str = "https://api.open-meteo.com/v1/forecast",
-    wind_threshold_kmh: float = 10.0,
     past_days: int = 0,
     forecast_days: int = 0,
-) -> str:
+) -> dict:
+    """Measured weather from Open-Meteo as structured data. Reports observations only: no derived
+    risk labels or scores (deciding what the weather means is the SOP rules' and agent's job)."""
     if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
-        return (
-            f"Corridor API Validation Error: coordinates ({latitude}, {longitude}) are out of bounds "
+        raise CorridorRequestError(
+            f"coordinates ({latitude}, {longitude}) are out of bounds "
             "(latitude must be in [-90, 90] and longitude in [-180, 180])."
         )
     if not (0 <= past_days <= 7 and 0 <= forecast_days <= 7):
-        return (
-            "Corridor API Validation Error: past_days and forecast_days must be between 0 and 7."
-        )
+        raise CorridorRequestError("past_days and forecast_days must be between 0 and 7.")
 
     params: dict[str, str | int | float] = {
         "latitude": latitude,
         "longitude": longitude,
         "current_weather": "true",
+        "timezone": "UTC",
     }
     if past_days > 0 or forecast_days > 0:
         params["daily"] = "temperature_2m_max,temperature_2m_min,windspeed_10m_max"
-        params["timezone"] = "UTC"
         if past_days > 0:
             params["past_days"] = past_days
         if forecast_days > 0:
@@ -58,39 +61,91 @@ def fetch_corridor_telemetry(
         return data
 
     raw = _get()
-    payload = raw.get("current_weather") or {}
-    temp = payload.get("temperature", "N/A")
-    wind = float(payload.get("windspeed", 0.0) or 0.0)
-
-    is_disrupted = wind > wind_threshold_kmh
-    congestion_index = 8.5 if is_disrupted else 2.5
-    status_note = "High Transit Disruption" if is_disrupted else "Corridor Normal"
-
-    lines = [
-        "--- LIVE CORRIDOR TELEMETRY ---",
-        f"Target GPS: {latitude}, {longitude}",
-        f"External Temp: {temp}°C | Wind Speed: {wind} km/h",
-        f"Corridor Risk: {status_note} (Congestion Index: {congestion_index}/10)",
-    ]
-
+    current = raw.get("current_weather") or {}
+    observations: dict = {
+        "source": "open-meteo",
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": {
+            "time": current.get("time"),
+            "temperature_c": _num(current.get("temperature")),
+            "wind_kmh": _num(current.get("windspeed")),
+            "wind_direction_deg": _num(current.get("winddirection")),
+        },
+        "daily": [],
+    }
     daily = raw.get("daily")
     if isinstance(daily, dict) and daily.get("time"):
-        times = daily.get("time") or []
         t_max = daily.get("temperature_2m_max") or []
         t_min = daily.get("temperature_2m_min") or []
         w_max = daily.get("windspeed_10m_max") or []
-        lines.append(f"Temporal Window (past_days={past_days}, forecast_days={forecast_days}):")
-        for idx, day_str in enumerate(times):
-            day_tmax = t_max[idx] if idx < len(t_max) else "N/A"
-            day_tmin = t_min[idx] if idx < len(t_min) else "N/A"
-            day_wind = float(w_max[idx] or 0.0) if idx < len(w_max) else 0.0
-            day_risk = "High Transit Disruption" if day_wind > wind_threshold_kmh else "Normal"
-            lines.append(
-                f"  - {day_str}: Temp {day_tmin}°C..{day_tmax}°C | Max Wind {day_wind} km/h ({day_risk})"
+        for idx, day in enumerate(daily.get("time") or []):
+            observations["daily"].append(
+                {
+                    "date": day,
+                    "temp_max_c": _num(t_max[idx]) if idx < len(t_max) else None,
+                    "temp_min_c": _num(t_min[idx]) if idx < len(t_min) else None,
+                    "wind_max_kmh": _num(w_max[idx]) if idx < len(w_max) else None,
+                }
             )
+    return observations
 
-    lines.append("-------------------------------")
+
+def _num(value) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt(value, unit: str) -> str:
+    return "n/a" if value is None else f"{value}{unit}"
+
+
+def format_corridor_observations(obs: dict, *, past_days: int = 0, forecast_days: int = 0) -> str:
+    current = obs.get("current") or {}
+    lines = [
+        "--- CORRIDOR WEATHER (Open-Meteo, measured) ---",
+        f"Target GPS: {obs.get('latitude')}, {obs.get('longitude')}",
+        f"Observed at: {current.get('time') or 'n/a'} UTC",
+        f"External Temp: {_fmt(current.get('temperature_c'), '°C')} | Wind Speed: {_fmt(current.get('wind_kmh'), ' km/h')}",
+    ]
+    if obs.get("daily"):
+        lines.append(f"Daily window (past_days={past_days}, forecast_days={forecast_days}):")
+        for day in obs["daily"]:
+            lines.append(
+                f"  - {day['date']}: Temp {_fmt(day['temp_min_c'], '°C')}..{_fmt(day['temp_max_c'], '°C')}"
+                f" | Max Wind {_fmt(day['wind_max_kmh'], ' km/h')}"
+            )
+    lines.append("Note: weather only. Port congestion comes from telemetry (Port_Congestion_Level).")
+    lines.append("-----------------------------------------------")
     return "\n".join(lines)
+
+
+def fetch_corridor_telemetry(
+    latitude: float,
+    longitude: float,
+    *,
+    client: httpx.Client,
+    api_url: str = "https://api.open-meteo.com/v1/forecast",
+    past_days: int = 0,
+    forecast_days: int = 0,
+) -> str:
+    """Text form of `fetch_corridor_observations` for the LLM tool interface."""
+    try:
+        obs = fetch_corridor_observations(
+            latitude, longitude, client=client, api_url=api_url, past_days=past_days, forecast_days=forecast_days
+        )
+    except CorridorRequestError as exc:
+        return f"Corridor API Validation Error: {exc}"
+    return format_corridor_observations(obs, past_days=past_days, forecast_days=forecast_days)
+
+
+def build_corridor_client(settings: "AgentSettings", transport: httpx.BaseTransport | None = None) -> httpx.Client:
+    return httpx.Client(
+        timeout=httpx.Timeout(settings.corridor_timeout_s, connect=2.0),
+        transport=transport or httpx.HTTPTransport(retries=2),
+    )
 
 
 def make_corridor_conditions_tool(
@@ -102,10 +157,7 @@ def make_corridor_conditions_tool(
     from agent.config import get_agent_settings
 
     cfg = settings or get_agent_settings()
-    http_client = httpx.Client(
-        timeout=httpx.Timeout(cfg.corridor_timeout_s, connect=2.0),
-        transport=transport or httpx.HTTPTransport(retries=2),
-    )
+    http_client = build_corridor_client(cfg, transport)
 
     @tool("fetch_corridor_conditions")
     def fetch_corridor_conditions(
@@ -114,15 +166,15 @@ def make_corridor_conditions_tool(
         past_days: int = 0,
         forecast_days: int = 0,
     ) -> str:
-        """Fetches past, present (live), and future (forecast) weather and corridor conditions from Open-Meteo for given GPS coordinates.
-        Set past_days (0-7) for historical weather correlation or forecast_days (0-7) for upcoming route forecasts."""
+        """Fetches measured weather (temperature, wind) from Open-Meteo for given GPS coordinates: current
+        conditions, plus past_days (0-7) of history or forecast_days (0-7) of forecast. Weather only:
+        port congestion is the Port_Congestion_Level column in query_telemetry_db."""
         try:
             return fetch_corridor_telemetry(
                 latitude,
                 longitude,
                 client=http_client,
                 api_url=cfg.corridor_api_url,
-                wind_threshold_kmh=cfg.corridor_wind_threshold_kmh,
                 past_days=past_days,
                 forecast_days=forecast_days,
             )

@@ -36,6 +36,9 @@ class AgentSettings(BaseSettings):
         validation_alias=AliasChoices("GEMINI_API_KEY", "GEMINI_APKEY"),
     )
     gemini_model: str = "gemini-3.8-flash"
+    # Gemini "thinking" before answering. 0 turns it off (measured: first token 13.4 s -> 6.4 s);
+    # thresholds and checks now run in code, so the reasoner needs little of it. Unset = model default.
+    gemini_thinking_budget: int | None = Field(default=0, ge=0)
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4o"
     ollama_model: str = "qwen2.5:7b"
@@ -57,10 +60,27 @@ class AgentSettings(BaseSettings):
     # ---- Corridor Weather REST API (TDD 2.2) ----------------------------------------
     corridor_api_url: str = "https://api.open-meteo.com/v1/forecast"
     corridor_timeout_s: float = Field(default=6.0, gt=0.0)
-    corridor_wind_threshold_kmh: float = Field(default=10.0, ge=0.0)
 
     # ---- In-Process SOP RAG ---------------------------------------------------------
     rag_top_k: int = Field(default=5, gt=0, le=50)
+
+    # ---- Agentic dispatch workflow ---------------------------------------------------
+    # A reading is "fresh" (and can trigger SOP actions) only if newer than this window.
+    evidence_freshness_hours: float = Field(default=24.0, gt=0.0)
+    # Half-width (degrees) of the box searched around a named place such as "Long Beach".
+    area_half_width_deg: float = Field(default=0.35, gt=0.0, le=5.0)
+    # Who decides, per step. "code": coded logic only. "shadow": also ask the model and audit the
+    # comparison, but use the coded result. "model": use the model within the coded guardrails.
+    routing_mode: Literal["code", "shadow", "model"] = "code"
+    thresholds_mode: Literal["code", "shadow", "model"] = "code"
+    verification_mode: Literal["code", "shadow", "model"] = "code"
+    # Optional models for those steps (same provider as AGENT_LLM); unset = the reasoner's model.
+    # Use a judge model that differs from the reasoner's, so the checker doesn't share its blind spots.
+    router_model: str | None = None
+    assess_model: str | None = None
+    judge_model: str | None = None
+    # Load the embedding model, Pinecone client and graph when the API server starts.
+    agent_prewarm: bool = True
 
     # ---- Immutable Auditing & Langfuse Traceability (TDD 3.3) -----------------------
     audit_enabled: bool = True

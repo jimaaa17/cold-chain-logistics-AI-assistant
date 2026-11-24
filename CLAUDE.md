@@ -9,7 +9,7 @@ Cold-Chain Logistics AI-Assistant: a natural-language "control tower" for logist
 The repo is a **BE/ + FE/ monorepo**:
 
 ```
-FE/ (React, :5173) ──/api──▶ BE/api (FastAPI BFF, :8000, SSE) ──▶ BE/agent (LangGraph ReAct)
+FE/ (React, :5173) ──/api──▶ BE/api (FastAPI BFF, :8000, SSE) ──▶ BE/agent (LangGraph dispatch workflow)
                                                                      ├─ telemetry_sql → MSSQL FDE_VIEWS.VW_ACTIVE_FLEET (USR_FDE_RO)
                                                                      ├─ corridor_api  → Open-Meteo
                                                                      └─ sop_rag       → BE/rag retrieval (in-process) → Pinecone
@@ -34,7 +34,8 @@ python -m unittest tests.test_rag_services.TestIngestion.test_shrunk_document_pr
 
 # Agent from the CLI
 python -m agent --dry-run                       # validate config and guards only
-python -m agent --prompt "..." [--llm GEMINI|OPENAI|OLLAMA] [--session-id X]
+python -m agent --prompt "..." [--llm GEMINI|OPENAI|OLLAMA] [--session-id X] [--decision approve|reject]
+python -m agent --legacy-react --prompt "..."    # previous single ReAct loop, for comparison
 
 # API gateway / BFF
 uvicorn api.server:app --host 127.0.0.1 --port 8000   # FastAPI app
@@ -58,7 +59,7 @@ python -m legacy_ingest [--dry-run] [--mode refresh|upsert] [--csv PATH] [--forc
 
 `docs/instructions.md` covers starting the MSSQL container (`mcr.microsoft.com/mssql/server:2022-latest` in Docker, locally or on EC2), checking the load (expected 32,065 rows) and the systemd setup. After loading, run `BE/sql/setup_security_view.sql` as admin to create the view, the RO login and the audit table.
 
-**CI/CD** (`.github/workflows/deploy.yml`): on push/PR to `main` it runs the backend unittest suite, then `npm install && npm test && npm run build` in `FE/`. Deployment to EC2 over SSH runs only on manual `workflow_dispatch`: it does a git pull, installs deps, builds FE, and restarts the `fde-api` and `streamlit` systemd units.
+**CI/CD** (`.github/workflows/deploy.yml`): on push/PR to `main` it runs the backend unittest suite, then `npm ci && npm test && npm run build` in `FE/`. **Merging to `main` deploys:** every push to `main` whose checks pass (and a manual `workflow_dispatch` run on `main`) deploys to EC2 over SSH, using the `FDE-YT-Cold` environment unless the manual run names another. It does a git pull, installs deps, builds FE, and restarts the `fde-api` and `streamlit` systemd units. The script stops at the first failed command (`set -e`), except that a failed restart is ignored (`|| true`), so a green run doesn't prove the services came back. A restart drops in-memory sessions, including pending approvals.
 
 ## Data & security model
 
@@ -70,8 +71,26 @@ python -m legacy_ingest [--dry-run] [--mode refresh|upsert] [--csv PATH] [--forc
 
 ## Backend packages (`BE/`)
 
-### `agent/`: LangGraph ReAct orchestrator
-- `graph.py`: builds the `StateGraph` (reasoner ⇄ `ToolNode`, `tools_condition`, `MemorySaver` checkpoint keyed by `thread_id` = session id). It has no import-time side effects; the LLM, engine and vector store are built lazily or injected (tests inject fakes). `build_reasoner_llm()` selects `AGENT_LLM` = `GEMINI` (default model `gemini-3.8-flash`), `OPENAI` (`gpt-4o`) or `OLLAMA` (`qwen2.5:7b`). `format_message_content()` normalizes Gemini's multi-block content.
+### `agent/`: agentic dispatch workflow
+- `dispatch/`: the LangGraph state machine the BFF and CLI run (`agent/workflow.py` is a re-export facade kept for existing imports and for the tests that patch `agent.workflow.build_dispatch_workflow`). The package is laid out as:
+  - `graph.py`: topology only.
+  - `nodes/`: one module per step (`intake`, `route`, `planner`, `gather`, `ledger`, `assess`, `reasoning`, `approval`, `finalize`). Each is a plain function taking `(state, runtime: Runtime[DispatchContext])`.
+  - `context.py`: `DispatchResources` and `DispatchContext` (settings, resources, clock, prompts).
+  - `state.py`: internal `DispatchState` plus the public `DispatchInput` (messages) and `DispatchOutput` (messages, final, verification, approval).
+  - `events.py`: the custom event shapes.
+  - `resilience.py`: `run_model_step`, the failure policy for model calls: one retry if transient, then a coded fallback, one entry in `gaps` (append-only; reset by `intake`) and an audited `degraded` event. Build clients and prompts outside it, so a missing key is still an error. A failed reasoner gives an evidence-only answer with no ACTION lines that skips the verifier.
+  - `consult.py`, `schemas.py`: optional model decisions. `ROUTING_MODE`, `THRESHOLDS_MODE`, `VERIFICATION_MODE` are `code` (default, no extra calls), `shadow` (also ask the model, audit a `model_decision` event, use code) or `model`. Guardrails: the router is only asked when code says `open`/`clarify`; `rules.py` breaches are a floor and model findings carry no actions; the judge can only add problems. `ROUTER_MODEL`/`ASSESS_MODEL`/`JUDGE_MODEL` optionally pick other models. Run `python tests/evals/dispatch_cases.py` (real model, not CI) before switching a mode.
+  - `prompts/`: one module per step. `reasoner.py` and `planner.py` export `ChatPromptTemplate`s (system text, optional `history` placeholder, human turn) that the nodes render with `format_messages(...)`; `reasoner.py` also has the optional `gaps_block` / `retry_block` sections. `clarify.py` is a plain `CLARIFY_TEXT`. The system text uses XML-tagged sections; settings (`freshness_hours`, `max_rows`) and the planner's intent fields (`intent_variables`: place, area and temperature filters as SQL conditions) are passed at render time, never read at import. `DispatchContext` holds the templates, so tests can inject others. Double any literal `{` / `}` in template text.
+  - `streaming.py`: `iter_dispatch_events`, `pending_approval` and `collect_final`.
+
+  Nodes take clients only from `runtime.context` and never build them. `iter_dispatch_events` is the one place the graph runs, and it passes `context=graph.dispatch_context`; a direct `graph.stream`/`invoke` must do the same.
+
+  The flow: `intake` routes the question in code (`intent.py`): `incident_scan` fans out telemetry + weather + SOP in parallel with `Send` (no LLM planning call), `sop_lookup` searches the SOP only, `open` lets an LLM `planner` pick tool calls, `clarify` answers without tools. Results go to `ledger` (`evidence.py`: records with source, fields, `as_of`, and `fresh`/`historical`/`undated`/`forecast` by `EVIDENCE_FRESHNESS_HOURS`, default 24; rows from `COUNT`/`AVG`/`GROUP BY` queries are `aggregated`, never fresh, and can't trigger a rule; the verifier rejects "no SOP action is required" when no individual reading was checked) and `assess` (`rules.py`: SOP §1–§3 as code; only fresh telemetry triggers actions; weather never does). The `reasoner` LLM writes from the ledger and tags actions as `ACTION[id] on [T1]`; the `verifier` (`verifier.py`, plain code) checks numbers, citations, permitted actions, freshness wording and trigger coverage, sends the draft back **once**, then labels it unverified. `action_gate` calls `interrupt()` for high-stakes actions (diversions, write-offs) and resumes with the dispatcher's decision; `finalize` renders actions, verification and the decision. Nodes emit events through `runtime.stream_writer`; `iter_dispatch_events` adapts them (plus reasoner tokens) for the BFF. `DispatchResources` holds the shared LLM, SQL engine, HTTP client and `RetrievalService`, and `warm()` pre-loads them.
+- `dispatch/prompts/reasoner.py`: the reasoner's rules and answer layout. The verifier enforces rules 1–5, so keep the two consistent.
+- When the SOP changes, update `rules.py` (thresholds, `view_field`/`direction`, permitted actions, `HIGH_STAKES_ACTIONS`). The emergency cold-storage diversion is not permitted because telemetry has no ETA-delay field.
+
+The previous single ReAct loop remains for comparison (`--legacy-react`) and its tests:
+- `graph.py`: builds the `StateGraph` (reasoner ⇄ `ToolNode`, `tools_condition`, `MemorySaver` checkpoint keyed by `thread_id` = session id). It has no import-time side effects; the LLM, engine and vector store are built lazily or injected (tests inject fakes). `build_reasoner_llm()` and `build_default_tools()` live in `llm.py` (shared with the dispatch workflow; `graph.py` re-exports them). `build_reasoner_llm()` selects `AGENT_LLM` = `GEMINI` (default model `gemini-3.8-flash`), `OPENAI` (`gpt-4o`) or `OLLAMA` (`qwen2.5:7b`). `format_message_content()` normalizes Gemini's multi-block content.
 - `config.py`: pydantic-settings `AgentSettings` / `get_agent_settings()`, covering the LLM, SQL connection, corridor API, `RAG_TOP_K`, audit and Langfuse settings, and `SYSTEM_PROMPT_PATH`.
 - `tools/`: factory functions (`make_telemetry_sql_tool`, `make_corridor_conditions_tool`, `make_inprocess_sop_tool`) that return LangChain tools. Every tool **degrades instead of raising**: it returns an explanatory string (validation error, API unavailable, or the SOP sentinels `SOP_KNOWLEDGE_BASE_UNAVAILABLE` / `SOP_QUERY_REJECTED` / `NO_MATCHING_SOP`), so the LLM reports missing or stale data rather than inventing it. Transient failures retry via `rag.core.resilience.with_retry`.
 - `prompts/system_prompt.txt`: the persona, tool order (telemetry → corridor → SOP) and a strict Markdown answer template (a single shipment table, 🔴 for > 4.0 °C, SOP citation). The FE renders this Markdown, so prompt format changes are UI changes.
@@ -81,7 +100,9 @@ python -m legacy_ingest [--dry-run] [--mode refresh|upsert] [--csv PATH] [--forc
 - `create_app(agent_streamer=, audit_writer=, audit_reader=)` lets you inject fakes (see `tests/test_fe_api.py`). The module-level `app` is for uvicorn.
 - Endpoints: `GET /healthz`, `GET /api/v1/meta` (active LLM and model, embeddings, observability status, `config_errors`), `GET /api/v1/traces`, `POST /api/v1/session/purge` (deletes the old thread's checkpoint, returns a new id), `POST /api/v1/dispatch/stream` (SSE), `POST /api/v1/audit/logs` (admin creds in body). `/meta` and purge are built by shared functions (`build_meta_payload`, `build_purge_payload`) so both servers return the same thing.
 - Audit: each dispatch run writes the operator prompt (`user_input` / `Dispatcher`) and then one row per step through `SqlAuditLedgerExporter`, using the telemetry engine from `AgentSettings` (configured database, `AUDIT_ENABLED`, `AUDIT_TABLE`). The audit reader uses the same server and database with the admin credentials from the request.
-- SSE event types: `status`, `tool_input`, `tool_output`, `final_answer`, `error`, `done`. The FE reasoning timeline depends on these names, so change both sides together.
+- SSE event types: `status`, `tool_input`, `tool_output`, `evidence`, `draft_start`, `token`, `verification`, `degraded`, `model_decision`, `approval_required`, `approval_recorded`, `final_answer`, `error`, `done` (with `outcome`: `complete` | `awaiting_approval` | `error`). Tokens, `draft_start` and `status` are streamed only; every other step is audited. The FE applies them in `features/dispatch/hooks/dispatchEvents.js`, so change both sides together.
+- `POST /api/v1/dispatch/approve` (`{session_id, decision: approve|reject, by, note}`) resumes a run paused at the action gate and streams the rest as SSE; the decision is audited first (`approval` / `Dispatcher`). There is no authentication: `by` is whatever the client sends.
+- Startup pre-warms the workflow (`prewarm_agent`: graph, LLM client, SQL engine, embedding model with one probe embedding) unless `AGENT_PREWARM=false`; failures are logged, not fatal. Gemini runs with `GEMINI_THINKING_BUDGET=0` by default (measured first token 13.4 s → 6.4 s); unset it for the model default.
 - If the graph can't be built (bad settings, missing key or provider package), `_get_compiled_graph` raises `AgentConfigError` and the stream ends with an SSE `error` frame naming the problem (field/reason only, never raw values). Runtime errors during the run surface the same way. The canned `_offline_fallback_streamer` stream is opt-in via `AGENT_OFFLINE_DEMO=1` for UI work without keys (ignored when `APP_ENV=production`), and is used only when the graph can't be built: never spliced into, or substituted for, a live run (mid-run failures and empty runs end with an `error` frame). Its events carry `simulated: true`, which adds a `status` frame with `phase: "simulated"`, a `simulated` flag on every frame, a `[SIMULATED: AGENT_OFFLINE_DEMO]` prefix on audit/span content, and an amber banner in `MessageBubble`. There is no fallback to legacy `src.orchestrator`.
 - `run_stdlib_server()` mirrors the same endpoints with only the stdlib (`python -m api.server`) and must be kept in sync with the FastAPI routes.
 
@@ -120,6 +141,12 @@ The session id (`thread_id`) persists across reloads and can be purged with one 
 - `test_rag_services.py`: ingestion and retrieval.
 - `test_agent_and_multimodal_rag.py`: graph, tools and image SOPs.
 - `test_fe_api.py`: BFF contract and SSE frames.
+- `test_dispatch_workflow.py`: intent routing, ledger, rules, verifier, the workflow graph (fan-out, retry, unverified, approval) and the approve endpoint, with fake LLM, SQL, weather and retrieval.
+- `test_dispatch_nodes.py`: single nodes and routers called directly with `Runtime(context=DispatchContext(...))`, the context wiring guard, and the public input/output schemas.
+- `test_dispatch_resilience.py`: the failure policy (retries, fallbacks, gaps, whole-graph outage).
+- `test_dispatch_model_decisions.py`: the code/shadow/model modes and each guardrail.
+- `test_aggregate_evidence.py`: aggregate rows never count as fresh and can't give an all-clear.
+- `test_sop_rules.py`: SOP rule regressions for F7 (weather never triggers; congestion only from telemetry in the LB/LA area).
 - `test_legacy_ingest.py`: the loader.
 - `review_findings_test.py` and `open_findings/`: regression tests for code-review findings (reviews in `materials/code-review/`).
 
