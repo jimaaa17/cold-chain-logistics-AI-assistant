@@ -116,6 +116,7 @@ flowchart LR
 | Question type | What happens |
 |---|---|
 | Incident scan ("which shipments near Long Beach are above 4 °C?") | Telemetry, weather and SOP are fetched in parallel, with no planning call |
+| SOP history ("how often would the SOP have triggered in 2023?") | Coded yearly and monthly breach counts, plus the SOP; no actions |
 | SOP lookup ("when do we escalate to Tier 2?") | Only the SOP is searched |
 | Open question ("average temperature by risk class?") | The model plans which tools to call |
 | Out of scope or too vague | The assistant asks for clarification and calls no tools |
@@ -128,6 +129,7 @@ BE/
 ├── api/             FastAPI gateway (SSE)
 ├── rag/             SOP ingestion and retrieval
 ├── legacy_ingest/   Telemetry CSV → SQL Server loader
+├── data_synth/      Synthetic telemetry generator
 ├── observability/   Audit and tracing exporters
 └── sql/             Read-only view, agent login, audit table
 FE/                  React console
@@ -245,24 +247,48 @@ curl -N http://127.0.0.1:8000/api/v1/dispatch/stream \
   -d '{"session_id": "demo", "prompt": "When does the SOP require escalation to the Tier 2 Logistics Manager?"}'
 ```
 
-### Working with historical data
+### Asking about past years
 
-Only readings from the last 24 hours can trigger SOP actions. Everything in the dataset is older, so
-by default breaches are reported as `historical` and no action is recommended. This is intended:
-the assistant doesn't act on old readings.
+Only readings from the last 24 hours can trigger SOP actions, because an action (call the driver, divert
+the truck) assumes the reading still describes the truck. The dataset ends in August 2024, so the
+assistant never recommends an action on it.
 
-To demonstrate actions and approvals, widen the window for one run of the API:
+You can still ask what the SOP would have required. Name a period in the question:
+
+* "How often would the SOP have triggered in 2021-2024, and is it seasonal?" gives breach rates per year
+  and per calendar month, counted in SQL from the same rules, with a statistical test for seasonality.
+* "Which shipments in July 2023 broke the SOP?" lists readings with what the SOP would have required.
+
+These answers never propose actions or ask for approval. In this dataset the test finds **no seasonal
+pattern**: breach rates barely change from month to month, and port congestion has too few readings near
+Long Beach and Los Angeles to judge.
+
+### Synthetic live data
+
+To see actions and approvals, generate readings for the last 24 hours and load them into a table of
+their own:
 
 ```sh
-EVIDENCE_FRESHNESS_HOURS=60000 uvicorn api.server:app --host 127.0.0.1 --port 8000
+python -m data_synth --scenario port_congestion --load
 ```
 
-The same readings are then labelled `fresh`, and a diversion waits for approval. Use this for
-demonstrations only.
+Check `SQL_SERVER_HOST` first; a remote host is refused. Scenarios: `cooling_failure`,
+`port_congestion`, `high_risk_delay`, `clean`. The generator also fills the hours since August 2024.
+Readings go stale after 24 hours, so run it again when needed, or remove them all with `--reset`.
+
+Synthetic readings are marked in the database, the answer, the approval request and the audit log, and
+are never added to real ones. The fleet behaviour is assumed, not measured.
+
+If your database was set up before this feature, run `BE/sql/add_synthetic_source.sql` as admin first:
+
+```sh
+docker exec -i legacy-mssql /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P '<admin-password>' -C -b -i /dev/stdin < BE/sql/add_synthetic_source.sql
+```
 
 ![Approval request to divert a shipment, with Approve and Reject buttons](docs/images/approval-gate.png)
 
-_Demonstration on historical data with the widened window._
+_Screenshot taken before synthetic data was labelled in the console._
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

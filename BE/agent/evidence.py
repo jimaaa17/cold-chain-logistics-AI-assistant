@@ -17,6 +17,11 @@ FORECAST = "forecast"
 UNDATED = "undated"
 AGGREGATED = "aggregated"  # a COUNT/AVG/... row: covers many readings, so it is never "fresh"
 
+# Where a telemetry row comes from. UNKNOWN: the query didn't return or filter on Data_Source.
+REAL = "historical"
+SYNTHETIC = "synthetic"
+UNKNOWN_SOURCE = "unknown"
+
 SOP_EXCERPT_CHARS = 700
 
 
@@ -68,27 +73,61 @@ def is_aggregate_sql(sql: str) -> bool:
     return bool(_AGGREGATE_SQL.search(_LATEST_READING_FILTER.sub(" ", sql or "")))
 
 
+_SOURCE_FILTER = re.compile(r"\bData_Source\]?\s*=\s*N?'(historical|synthetic)'", re.I)
+_SOURCE_ALIAS = re.compile(r"\bAS\s+\[?Data_Source\b", re.I)
+
+
+def source_filter(sql: str) -> str | None:
+    """The single data source a query restricts itself to, if that is certain."""
+    found = {m.lower() for m in _SOURCE_FILTER.findall(sql or "")}
+    if len(found) != 1 or re.search(r"\b(?:OR|NOT|UNION)\b", sql, re.I):
+        return None
+    return found.pop()
+
+
+def data_source_of(value: Any, sql_source: str | None, sql: str = "") -> str:
+    """The row's Data_Source column when the query returned it unchanged, else the query's filter."""
+    name = str(value or "").strip().lower()
+    if name in (REAL, SYNTHETIC) and not _SOURCE_ALIAS.search(sql):
+        return name
+    return sql_source or UNKNOWN_SOURCE
+
+
 def telemetry_records(
     columns: list[str], rows: Iterable[Iterable[Any]], *, now: datetime, window_hours: float, start: int = 1,
-    aggregated: bool = False,
+    aggregated: bool = False, sql: str = "",
 ) -> list[dict]:
     """With `aggregated`, the timestamp is only the newest reading behind the row, so the row is labelled
     AGGREGATED instead of taking that reading's freshness (and can't trigger or permit an SOP action)."""
     records = []
+    sql_source = source_filter(sql)
     for offset, row in enumerate(rows):
-        fields = {col: _plain(val) for col, val in zip(columns, row)}
+        fields = {col: _plain(val) for col, val in zip(columns, row) if val is not None or not aggregated}
+        data_source = data_source_of(fields.pop("Data_Source", None), sql_source, sql)
         as_of = to_utc(fields.pop("Timestamp", None))
         records.append(
             {
                 "id": f"T{start + offset}",
                 "source": "telemetry",
-                "origin": "FDE_VIEWS.VW_ACTIVE_FLEET",
+                "origin": "FDE_VIEWS.VW_ACTIVE_FLEET"
+                + {REAL: " (real data)", SYNTHETIC: " (synthetic data)", UNKNOWN_SOURCE: " (data source not stated)"}.get(data_source, ""),
+                "data_source": data_source,
                 "as_of": as_of.isoformat() if as_of else None,
                 "freshness": AGGREGATED if aggregated else classify_freshness(as_of, now, window_hours),
                 "fields": fields,
             }
         )
     return records
+
+
+def source_counts(ledger: Iterable[dict]) -> dict[str, int]:
+    """Telemetry records per data source."""
+    counts: dict[str, int] = {}
+    for rec in ledger:
+        if rec["source"] == "telemetry":
+            name = rec.get("data_source") or UNKNOWN_SOURCE
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def weather_records(obs: dict, *, now: datetime, window_hours: float, start: int = 1) -> list[dict]:
@@ -158,6 +197,10 @@ def fmt_value(value: Any) -> str:
     return str(value)
 
 
+def would_have_required(item: dict, action_labels: dict[str, str]) -> str:
+    return "; ".join(action_labels.get(a, a) for a in item["actions"]) or "no action"
+
+
 def render_ledger(
     ledger: list[dict],
     triggers: list[dict],
@@ -167,12 +210,15 @@ def render_ledger(
     window_hours: float,
     notes: list[str] | None = None,
     include_assessment: bool = True,
+    retrospective: bool = False,
+    action_labels: dict[str, str] | None = None,
 ) -> str:
     """Compact text form handed to the models (one line per record).
 
     `notes` lists valid-but-empty results ("telemetry: no rows matched the query"). With
     `include_assessment=False` the SOP trigger sections are left out, so a model assessing the
-    thresholds itself isn't anchored on the coded result."""
+    thresholds itself isn't anchored on the coded result. With `retrospective` (the question names a past
+    period) each past breach also says what the SOP would have required; that permits no action."""
     lines = [f"EVIDENCE LEDGER (now {now.strftime('%Y-%m-%d %H:%M')} UTC; fresh = newer than {window_hours:g} h)"]
     if not ledger:
         lines.append("(no evidence gathered)")
@@ -201,9 +247,15 @@ def render_ledger(
             f"-> allowed actions: {', '.join(trig['actions'])}"
         )
     lines.append("")
-    lines.append("HISTORICAL OR UNDATED BREACHES (report as history; never propose actions for these):")
+    lines.append(
+        "HISTORICAL OR UNDATED BREACHES (report as history; never propose actions for these"
+        + ("; you may say what the SOP would have required):" if retrospective else "):")
+    )
     if not historical:
         lines.append("none")
     for trig in historical:
-        lines.append(f"- {trig['rule']} on [{trig['evidence']}] ({trig['freshness']}): {trig['summary']} ({trig['sop_ref']})")
+        line = f"- {trig['rule']} on [{trig['evidence']}] ({trig['freshness']}): {trig['summary']} ({trig['sop_ref']})"
+        if retrospective:
+            line += f" | SOP would have required: {would_have_required(trig, action_labels or {})}"
+        lines.append(line)
     return "\n".join(lines)

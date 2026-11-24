@@ -16,7 +16,7 @@ from agent.dispatch.resilience import EmptyModelReply, run_model_step
 from agent.dispatch.schemas import Verdict
 from agent.dispatch.state import DispatchState
 from agent.dispatch.text import history, text_of
-from agent.evidence import fmt_value, render_ledger
+from agent.evidence import fmt_value, render_ledger, would_have_required
 from agent.llm import LLMTask
 from agent.rules import ACTION_LABELS
 from agent.verifier import MAX_ATTEMPTS, verify_draft
@@ -31,6 +31,7 @@ def _ledger_text(state: DispatchState, ctx: DispatchContext) -> str:
         state.get("ledger", []), state.get("triggers", []), state.get("historical", []),
         now=datetime.fromisoformat(state["as_of"]) if state.get("as_of") else ctx.clock(),
         window_hours=ctx.settings.evidence_freshness_hours, notes=state.get("notes") or None,
+        retrospective=bool((state.get("intent") or {}).get("period")), action_labels=ACTION_LABELS,
     )
 
 
@@ -103,7 +104,7 @@ def evidence_only_answer(state: DispatchState) -> str:
         fields = " · ".join(f"{k}={fmt_value(v)}" for k, v in (rec.get("fields") or {}).items())
         return f"- [{rec['id']}] {when} UTC, {rec['freshness']}" + (f": {fields}" if fields else "")
 
-    for title, source in (("Readings", "telemetry"), ("Weather", "weather")):
+    for title, source in (("Readings", "telemetry"), ("Seasonality test", "analysis"), ("Weather", "weather")):
         group = [r for r in records if r["source"] == source]
         if group:
             lines += ["", f"## {title}", *[record_line(r) for r in group]]
@@ -118,7 +119,12 @@ def evidence_only_answer(state: DispatchState) -> str:
     historical = state.get("historical") or []
     if historical:
         lines += ["", "## Historical or undated breaches (not current)"]
-        lines += [f"- {t['rule']} on [{t['evidence']}] ({t['freshness']}): {t['summary']}" for t in historical]
+        past = bool((state.get("intent") or {}).get("period"))
+        lines += [
+            f"- {t['rule']} on [{t['evidence']}] ({t['freshness']}): {t['summary']}"
+            + (f". The SOP would have required: {would_have_required(t, ACTION_LABELS)}" if past else "")
+            for t in historical
+        ]
     sop = [r for r in records if r["source"] == "sop"]
     if sop:
         lines += ["", "## SOP excerpts"]
@@ -159,6 +165,7 @@ def verifier(state: DispatchState, runtime: Runtime[DispatchContext]) -> dict:
         historical=state.get("historical", []),
         question=state.get("question", ""),
         window_hours=runtime.context.settings.evidence_freshness_hours,
+        retrospective=bool((state.get("intent") or {}).get("period")),
     )
     gaps: list[str] = []
     if mode != "code" and result["passed"]:

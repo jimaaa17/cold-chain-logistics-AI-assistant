@@ -3,6 +3,8 @@
 - ``incident_scan``: the standard "what is going on with shipments (near X)?" question. Fixed fan-out:
   telemetry + weather + SOP, no planning call.
 - ``sop_lookup``: a policy question with no data request. SOP search only.
+- ``sop_history``: how often the SOP would have triggered in a past period, or whether breaches are
+  seasonal. Coded rollups plus SOP search, no planning call.
 - ``open``: in scope but not a standard shape (aggregates, comparisons). An LLM plans the tool calls.
 - ``clarify``: out of scope or too vague. Answered directly, no tools.
 """
@@ -10,6 +12,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime
+
+from agent.evidence import utc_now
+from agent.period import SEASONAL, parse_period
+from agent.rules import RULES
 
 # Named places operators use, with a representative point (lat, lon).
 GAZETTEER: dict[str, tuple[float, float]] = {
@@ -54,15 +61,29 @@ _POLICY = re.compile(
 _LISTING = re.compile(r"\bwhich\b|\bshow\b|\blist\b|\bany\b|\bcurrent|\bnow\b|\blatest\b|\bnear\b|\baround\b", re.I)
 
 
+_SOP_EVENT = re.compile(
+    r"\bsop\b|breach|\bbroke\b|\bbreak|violat|trigger|excursion|escalat|threshold|divert|diversion|complian|exceed", re.I
+)
+_BREACH = re.compile(r"breach|\bbroke\b|\bbreak|violat|trigger|excursion|exceed", re.I)
+_READINGS = re.compile(r"\b(?:which|show|list|any|what)\b(?:\s+\w+){0,3}?\s+(?:shipments?|readings?|trucks?|vehicles?|cargo|reefers?)\b", re.I)
+_SOP_TEXT = re.compile(r"\bwhat (?:does|do|did) the (?:sop|procedure|policy)\b", re.I)
+
+
 @dataclass(frozen=True)
 class Intent:
-    kind: str  # incident_scan | sop_lookup | open | clarify
+    kind: str  # incident_scan | sop_lookup | sop_history | open | clarify
     reason: str
     place: str | None = None
     latitude: float | None = None
     longitude: float | None = None
     min_temp_c: float | None = None
     max_temp_c: float | None = None
+    # A past period the question names (ISO dates, end exclusive; None = open-ended). `period` is its label.
+    period: str | None = None
+    period_start: str | None = None
+    period_end: str | None = None
+    seasonal: bool = False
+    breaches_only: bool = False  # the question asks for readings that broke the SOP
 
     def to_state(self) -> dict:
         return asdict(self)
@@ -87,7 +108,7 @@ def _find_place(text: str) -> tuple[str | None, tuple[float, float] | None]:
     return None, None
 
 
-def classify_intent(question: str) -> Intent:
+def classify_intent(question: str, now: datetime | None = None) -> Intent:
     text = " ".join((question or "").split())
     if len(text.split()) < 2 or not _DOMAIN.search(text):
         return Intent("clarify", "not a cold-chain operations question")
@@ -102,6 +123,23 @@ def classify_intent(question: str) -> Intent:
         "min_temp_c": float(above.group(1)) if above else None,
         "max_temp_c": float(below.group(1)) if below else None,
     }
+    period = parse_period(text, now or utc_now())
+    seasonal = bool(SEASONAL.search(text))
+    if period:
+        common |= {
+            "period": period.label,
+            "period_start": period.start.date().isoformat() if period.start else None,
+            "period_end": period.end.date().isoformat() if period.end else None,
+        }
+    elif seasonal:
+        common["period"] = "all years on record"
+    if period or seasonal:
+        policy_text = _SOP_TEXT.search(text) and not _DATA.search(text)
+        about_sop = _SOP_EVENT.search(text) or (seasonal and _DATA.search(text))
+        listing = _READINGS.search(text) and not _ANALYTIC.search(text) and not seasonal
+        if about_sop and not policy_text and not listing:
+            return Intent("sop_history", "SOP breaches over a past period", seasonal=seasonal, **common)
+        common["breaches_only"] = bool(_BREACH.search(text)) and not policy_text
 
     if _ANALYTIC.search(text):
         return Intent("open", "aggregate or comparison question", **common)
@@ -124,16 +162,28 @@ def area_sql(intent: Intent, *, half_width_deg: float) -> list[str]:
     ]
 
 
+def period_sql(intent: Intent) -> list[str]:
+    """WHERE conditions for the intent's period (empty if none)."""
+    out = []
+    if intent.period_start:
+        out.append(f"Timestamp >= '{intent.period_start}'")
+    if intent.period_end:
+        out.append(f"Timestamp < '{intent.period_end}'")
+    return out
+
+
 def build_scan_sql(intent: Intent, *, half_width_deg: float, max_rows: int) -> str:
     """Fixed, validated-shape query for an incident scan (latest readings first)."""
-    where = area_sql(intent, half_width_deg=half_width_deg)
+    where = area_sql(intent, half_width_deg=half_width_deg) + period_sql(intent)
+    if intent.breaches_only:
+        where.append("(" + " OR ".join(f"({r.sql_predicate})" for r in RULES) + ")")
     if intent.min_temp_c is not None:
         where.append(f"Current_Temperature_C > {intent.min_temp_c:g}")
     if intent.max_temp_c is not None:
         where.append(f"Current_Temperature_C < {intent.max_temp_c:g}")
     sql = (
         f"SELECT TOP {int(max_rows)} Timestamp, Latitude, Longitude, Current_Temperature_C, Cargo_Condition_Code, "
-        "Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index "
+        "Risk_Classification, Delay_Probability, Port_Congestion_Level, Route_Risk_Index, Data_Source "
         "FROM FDE_VIEWS.VW_ACTIVE_FLEET"
     )
     if where:

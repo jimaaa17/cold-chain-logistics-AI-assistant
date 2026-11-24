@@ -19,6 +19,7 @@ from agent.dispatch.state import DispatchState
 from agent.dispatch.text import history
 from agent.intent import GAZETTEER, SCAN_SOP_QUERY, Intent, build_scan_sql
 from agent.llm import LLMTask
+from agent.rollup import MAX_ROLLUP_ROWS, month_sql, year_sql
 
 FALLBACK_GAP = "router: model unavailable, routed by keyword rules"
 
@@ -88,13 +89,19 @@ def route_after_route(state: DispatchState, runtime: Runtime[DispatchContext]):
     if intent.kind == "incident_scan":
         sql = build_scan_sql(intent, half_width_deg=cfg.area_half_width_deg, max_rows=cfg.sql_max_rows)
         sends.append(Send("gather_telemetry", {"sql": sql}))
-        if intent.has_area:
+        if intent.has_area and intent.period is None:  # today's weather says nothing about a past period
             sends.append(
                 Send(
                     "gather_weather",
                     {"latitude": intent.latitude, "longitude": intent.longitude, "past_days": 0, "forecast_days": 1},
                 )
             )
+        sends.append(Send("gather_sop", {"query": SCAN_SOP_QUERY}))
+    elif intent.kind == "sop_history":
+        rollups = [("year", year_sql)] + ([("month", month_sql)] if intent.seasonal else [])
+        for name, build in rollups:
+            sql = build(intent, half_width_deg=cfg.area_half_width_deg)
+            sends.append(Send("gather_telemetry", {"sql": sql, "max_rows": MAX_ROLLUP_ROWS, "rollup": name}))
         sends.append(Send("gather_sop", {"query": SCAN_SOP_QUERY}))
     else:  # sop_lookup
         sends.append(Send("gather_sop", {"query": state["question"]}))

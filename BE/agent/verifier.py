@@ -7,6 +7,7 @@ An LLM checking its own answer shares its blind spots, so every check here is de
 3. Every proposed action (``ACTION[id] on [T3]``) is permitted by a trigger on fresh evidence.
 4. Historical readings are not described as active or live.
 5. Every trigger on fresh evidence is reported.
+6. No seasonal pattern is claimed unless the coded test ([H1]) found one.
 """
 from __future__ import annotations
 
@@ -15,10 +16,11 @@ from typing import Any
 
 from agent.evidence import AGGREGATED, FRESH
 from agent.rules import ACTION_LABELS, HIGH_STAKES_ACTIONS, THRESHOLDS
+from agent.seasonality import any_seasonal
 
 ACTION_TAG = re.compile(r"ACTION\[(\w+)\]\s*(?:on|for)?\s*\[([TWS]\d+)\]")
 _ALL_CLEAR = re.compile(r"\bno\s+(?:SOP\s+)?actions?\s+(?:is|are)\s+(?:currently\s+)?(?:required|needed)", re.I)
-EVIDENCE_ID = re.compile(r"\[([TWS]\d+)\]")
+EVIDENCE_ID = re.compile(r"\[([TWSH]\d+)\]")
 
 _STRIP_PATTERNS = (
     ACTION_TAG,
@@ -34,6 +36,19 @@ _ACTIVE_CLAIM = re.compile(
     r"\b(active shipments?|live (?:readings?|shipments?|data)|currently (?:in transit|active)|in transit now)\b", re.I
 )
 _NEGATION = re.compile(r"\b(no|not|none|never|without)\b[^.\n]{0,40}$", re.I)
+
+_TIME_OF_YEAR = (
+    r"(?:summer|winter|spring|autumn|fall|january|february|march|april|may|june|july|august|september|october|november|december)"
+)
+_SEASONAL_CLAIM = re.compile(
+    r"\b(?:strong|clear|marked|significant|is|are|shows?|has|have|an?)\s+(?:\w+\s+){0,2}?seasonal(?:ity)?\b|"
+    r"\bseasonal (?:peaks?|spikes?|effects?|trends?|patterns?|variations?|increases?)\b|"
+    rf"\b(?:peak(?:s|ed|ing)?|spik(?:es?|ed|ing)|ris(?:es?|ing)|rose|surg(?:es?|ed)|increas(?:es?|ed)|worsen(?:s|ed)?)\s+(?:in|during|every|each)\s+(?:the\s+)?{_TIME_OF_YEAR}\b|"
+    rf"\b(?:more (?:common|frequent|likely)|higher|worse)\s+(?:in|during)\s+(?:the\s+)?{_TIME_OF_YEAR}\b",
+    re.I,
+)
+_NO_SEASON = re.compile(r"\b(?:no|not|none|never|without|neither|cannot|can't|isn't|aren't|doesn't|whether|if|insufficient)\b", re.I)
+_SENTENCE_START = re.compile(r"[.!?]\s|\n|\|")
 
 MAX_ATTEMPTS = 2  # first draft + exactly one retry
 
@@ -53,9 +68,11 @@ def allowed_numbers(ledger: list[dict], triggers: list[dict], historical: list[d
     by_source: dict[str, int] = {}
     for rec in ledger:
         by_source[rec["source"]] = by_source.get(rec["source"], 0) + 1
-        for value in (rec.get("fields") or {}).values():
+        for key, value in (rec.get("fields") or {}).items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 allowed.add(float(value))
+                if key.lower().endswith("_pct"):  # 27.1 in a percentage column, written "27.1%"
+                    allowed.add(float(value) / 100.0)
         allowed.update(_numbers_in(rec.get("text", "")))
         allowed.update(_numbers_in(rec.get("origin", "")))  # e.g. the weather point's coordinates
         if rec.get("as_of"):  # bare years/months/days of a timestamp ("historical, 2022")
@@ -84,7 +101,9 @@ def verify_draft(
     historical: list[dict],
     question: str,
     window_hours: float,
+    retrospective: bool = False,
 ) -> dict[str, Any]:
+    """`retrospective`: the question named a past period, so current readings were never looked at."""
     problems: list[str] = []
     ids = {rec["id"] for rec in ledger}
 
@@ -124,9 +143,9 @@ def verify_draft(
     # Freshness wording
     telemetry = [r for r in ledger if r["source"] == "telemetry"]
     individual = [r for r in telemetry if r["freshness"] != AGGREGATED]
-    if not individual and _ALL_CLEAR.search(draft):
+    if (not individual or (retrospective and not any(r["freshness"] == FRESH for r in individual))) and _ALL_CLEAR.search(draft):
         problems.append(
-            "Says no SOP action is required, but no individual telemetry reading was checked. Say that SOP "
+            "Says no SOP action is required, but no current individual telemetry reading was checked. Say that SOP "
             "thresholds were not checked against current readings for this question."
         )
     if individual and not any(r["freshness"] == FRESH for r in individual):
@@ -134,6 +153,17 @@ def verify_draft(
             if not _NEGATION.search(draft[max(0, match.start() - 60): match.start()]):
                 problems.append(
                     f'Describes historical readings as "{match.group(1)}"; every telemetry reading here is historical.'
+                )
+                break
+
+    # Seasonality: only the coded test may establish it
+    analysis = [r for r in ledger if r["source"] == "analysis"]
+    if analysis and not any(any_seasonal(r) for r in analysis):
+        for match in _SEASONAL_CLAIM.finditer(draft):
+            starts = [m.end() for m in _SENTENCE_START.finditer(draft, 0, match.start())]
+            if not _NO_SEASON.search(draft[starts[-1] if starts else 0: match.end()]):
+                problems.append(
+                    f'Claims a seasonal pattern ("{match.group(0)}"), but the coded test {", ".join("[" + r["id"] + "]" for r in analysis)} found none.'
                 )
                 break
 

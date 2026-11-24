@@ -5,9 +5,22 @@ from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 
 from agent.dispatch.context import DispatchContext
+from agent.dispatch.nodes.ledger import PARTIAL_LIST_NOTE, SYNTHETIC_LEFT_OUT_NOTE
 from agent.dispatch.state import DispatchState
+from agent.evidence import SYNTHETIC, UNKNOWN_SOURCE, source_counts
 from agent.rules import ACTION_LABELS
 from agent.verifier import ACTION_TAG
+
+
+def source_notice(ledger: list[dict]) -> str:
+    """Written by code, so it can't be dropped by the model."""
+    counts = source_counts(ledger)
+    total = sum(counts.values())
+    if counts.get(SYNTHETIC):
+        return f"**Synthetic data:** {counts[SYNTHETIC]} of {total} telemetry records are generated, not real shipments."
+    if counts.get(UNKNOWN_SOURCE):
+        return "**Data source not stated:** some telemetry records may be synthetic."
+    return ""
 
 
 def render_final(state: DispatchState) -> str:
@@ -29,6 +42,13 @@ def render_final(state: DispatchState) -> str:
         return f"**Proposed action:** {label} [{evidence}]"
 
     body = ACTION_TAG.sub(_action, draft).strip()
+    notices = [source_notice(state.get("ledger") or [])]
+    if PARTIAL_LIST_NOTE in (state.get("notes") or []):
+        notices.append("**Partial list:** only the newest matching readings of the period are listed; more may match.")
+    if SYNTHETIC_LEFT_OUT_NOTE in (state.get("notes") or []):
+        notices.append("**Real readings only:** the period also has synthetic readings, which were left out.")
+    if shown := "\n\n".join(n for n in notices if n):
+        body = f"{shown}\n\n{body}"
     gaps = state.get("gaps") or []
     gaps_line = "**Not available:** " + "; ".join(gaps) + "." if gaps else ""
     if verification.get("skipped"):

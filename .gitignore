@@ -13,6 +13,7 @@ ENV/
 data/raw/
 data/processed/
 data/rejects/
+data/synthetic/
 *.csv
 *.parquet
 *.db

@@ -531,7 +531,8 @@ def default_approval_streamer(session_id: str, decision: dict[str, str]) -> Iter
 
 
 def build_readiness() -> tuple[int, dict[str, str]]:
-    """`/readyz` for both servers: can the agent be built and the telemetry view be read?
+    """`/readyz` for both servers: can the agent be built and the telemetry view be read? Reads Data_Source, so
+    a database without BE/sql/add_synthetic_source.sql is not ready.
     Reports error types only, because the endpoint has no login. Never raises."""
     try:
         resources = _get_compiled_graph().dispatch_resources
@@ -542,7 +543,7 @@ def build_readiness() -> tuple[int, dict[str, str]]:
         from agent.tools.telemetry_sql import fetch_telemetry_rows
 
         view = resources.settings.sql_allowed_view
-        fetch_telemetry_rows(resources.engine(), f"SELECT TOP 1 * FROM {view}", max_rows=1)
+        fetch_telemetry_rows(resources.engine(), f"SELECT TOP 1 Data_Source FROM {view}", max_rows=1)
     except Exception as exc:
         logger.warning("Not ready: telemetry database: %s", type(exc).__name__)
         return 503, {"status": "not_ready", "telemetry_db": type(exc).__name__}
