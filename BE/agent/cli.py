@@ -49,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         sys_prompt = load_system_prompt(settings.system_prompt_path)
         sample_sql = f"SELECT TOP 5 * FROM {settings.sql_allowed_view}"
         validate_readonly_select(sample_sql)
+        try:
+            settings.require_sql_password()
+        except ValueError as exc:
+            logger.error("Configuration error: %s", exc)
+            return 2
         logger.info(
             "Dry-run OK | LLM=%s | SQL=%s:%d (%s) | View=%s | SystemPrompt=%d chars",
             settings.agent_llm,

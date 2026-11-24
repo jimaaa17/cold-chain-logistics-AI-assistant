@@ -612,6 +612,7 @@ def build_meta_payload() -> dict[str, Any]:
             "OPENAI": agent_cfg.openai_model,
             "OLLAMA": agent_cfg.ollama_model,
         }.get(agent_cfg.agent_llm)
+        agent_cfg.require_sql_password()
     except Exception as exc:
         config_errors.append(f"agent: {_describe_config_error(exc)}")
     try:
